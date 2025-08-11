@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 app = Dash(__name__)
+server = app.server  # <-- wichtig für Gunicorn/Render
 app.title = "Battery Cost Estimator"
 
 # ------------------------------
