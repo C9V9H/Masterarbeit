@@ -1,16 +1,5 @@
 """
 Cell Manufacturing Cost Estimator (refactored)
-
-Key changes:
-- Centralised all numeric defaults into PRESETS; UI and model now read from presets only.
-- Replaced legacy overhead / G&A / R&D logic with explicit overhead factors:
-  * Indirect personnel, logistics personnel, building maintenance, machine maintenance.
-- Added logistics & indirect investment factors that scale equipment CAPEX and depreciation.
-- Added baseline building energy consumption (kW) and included it in energy cost per cell.
-- Reworked cell parameters UI to use Ah / Wh / V (two inputs determine the third).
-- Removed coating area inputs from the UI (still configurable via presets).
-- Added presets for an SSB cell and a SIB cell.
-- Fixed minor issues (e.g. `step="any"` instead of `step=any`) and improved readability.
 """
 
 from dataclasses import dataclass
@@ -2839,3 +2828,4 @@ def run_calc(
 if __name__ == "__main__":
     # NOTE: set debug=False in production deployments.
     app.run(debug=True)
+
