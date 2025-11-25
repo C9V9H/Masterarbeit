@@ -47,7 +47,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 37.8,
         "footprint_m2": 300,
         "kw_per_unit": 75.0,
-        "env": "none",
+        "env": "clean",
         "spec_workers_per_machine": 1,
         "supp_workers_per_machine": 0,
         "machines": 6,
@@ -107,7 +107,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 0.80,
         "footprint_m2": 12,
         "kw_per_unit": 25.0,
-        "env": "none",
+        "env": "clean",
         "spec_workers_per_machine": 0.5,
         "supp_workers_per_machine": 0.0,
         "machines": 23,
@@ -119,7 +119,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 2.5,
         "footprint_m2": 93,
         "kw_per_unit": 117.50,
-        "env": "none",
+        "env": "clean",
         "spec_workers_per_machine": 1.25,
         "supp_workers_per_machine": 0.0,
         "machines": 12,
@@ -131,7 +131,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 1.0,
         "footprint_m2": 60,
         "kw_per_unit": 22.0,
-        "env": "none",
+        "env": "dry",
         "spec_workers_per_machine": 0.66,
         "supp_workers_per_machine": 0.0,
         "machines": 25,
@@ -2828,5 +2828,6 @@ def run_calc(
 if __name__ == "__main__":
     # NOTE: set debug=False in production deployments.
     app.run(debug=True)
+
 
 
