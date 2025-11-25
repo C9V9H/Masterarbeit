@@ -83,7 +83,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 1.2,
         "footprint_m2": 11,
         "kw_per_unit": 56.0,
-        "env": "iso7",
+        "env": "none",
         "spec_workers_per_machine": 0.1,
         "supp_workers_per_machine": 0,
         "machines": 12,
@@ -95,7 +95,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 5.0,
         "footprint_m2": 12,
         "kw_per_unit": 5.0,
-        "env": "iso7",
+        "env": "none",
         "spec_workers_per_machine": 0.2,
         "supp_workers_per_machine": 0.0,
         "machines": 37,
@@ -107,7 +107,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 0.80,
         "footprint_m2": 12,
         "kw_per_unit": 25.0,
-        "env": "iso7",
+        "env": "none",
         "spec_workers_per_machine": 0.5,
         "supp_workers_per_machine": 0.0,
         "machines": 23,
@@ -119,7 +119,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 2.5,
         "footprint_m2": 93,
         "kw_per_unit": 117.50,
-        "env": "iso7",
+        "env": "none",
         "spec_workers_per_machine": 1.25,
         "supp_workers_per_machine": 0.0,
         "machines": 12,
@@ -131,7 +131,7 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
         "capex_meur_per_machine": 1.0,
         "footprint_m2": 60,
         "kw_per_unit": 22.0,
-        "env": "iso7",
+        "env": "none",
         "spec_workers_per_machine": 0.66,
         "supp_workers_per_machine": 0.0,
         "machines": 25,
@@ -299,10 +299,10 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "building_cost_eur_per_m2": 3360.0,
             "indoor_area_factor": 3.0,
             "outdoor_area_factor": 0.0,
-            "iso7_area_multiplier": 1.0,
-            "iso7_add_cost_eur_per_m2": 2850.0,
-            "iso8_area_multiplier": 1.15,
-            "iso8_add_cost_eur_per_m2": 120.0,
+            "clean_area_multiplier": 1.0,
+            "clean_add_cost_eur_per_m2": 2850.0,
+            "dry_area_multiplier": 1.15,
+            "dry_add_cost_eur_per_m2": 120.0,
             "annual_output_gwh": 10.0,
             "cell_ah": NMC_CELL_AH,
             "cell_voltage": NMC_CELL_V,
@@ -347,10 +347,10 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "building_cost_eur_per_m2": 3600.0,
             "indoor_area_factor": 1.25,
             "outdoor_area_factor": 0.35,
-            "iso7_area_multiplier": 1.35,
-            "iso7_add_cost_eur_per_m2": 260.0,
-            "iso8_area_multiplier": 1.20,
-            "iso8_add_cost_eur_per_m2": 130.0,
+            "clean_area_multiplier": 1.35,
+            "clean_add_cost_eur_per_m2": 260.0,
+            "dry_area_multiplier": 1.20,
+            "dry_add_cost_eur_per_m2": 130.0,
             "annual_output_gwh": 5.0,
             "cell_ah": 20.0,
             "cell_voltage": 3.8,
@@ -390,10 +390,10 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "building_cost_eur_per_m2": 3000.0,
             "indoor_area_factor": 1.15,
             "outdoor_area_factor": 0.25,
-            "iso7_area_multiplier": 1.25,
-            "iso7_add_cost_eur_per_m2": 220.0,
-            "iso8_area_multiplier": 1.10,
-            "iso8_add_cost_eur_per_m2": 100.0,
+            "clean_area_multiplier": 1.25,
+            "clean_add_cost_eur_per_m2": 220.0,
+            "dry_area_multiplier": 1.10,
+            "dry_add_cost_eur_per_m2": 100.0,
             "annual_output_gwh": 8.0,
             "cell_ah": 12.0,
             "cell_voltage": 2.5,
@@ -502,10 +502,10 @@ class GeneralAssumptions:
     building_cost_eur_per_m2: float
     indoor_area_factor: float
     outdoor_area_factor: float
-    iso7_area_multiplier: float
-    iso7_add_cost_eur_per_m2: float
-    iso8_area_multiplier: float
-    iso8_add_cost_eur_per_m2: float
+    clean_area_multiplier: float
+    clean_add_cost_eur_per_m2: float
+    dry_area_multiplier: float
+    dry_add_cost_eur_per_m2: float
     annual_output_gwh: float
     cell_ah: float
     cell_wh: float
@@ -718,27 +718,27 @@ class BatteryCostModel:
         )
         env_series = df["env"].astype(str).str.lower()
 
-        base_indoor_iso7 = float(
+        base_indoor_clean = float(
             (
-                df.loc[env_series.eq("iso7"), "footprint_m2"]
-                * df.loc[env_series.eq("iso7"), "machines"]
+                df.loc[env_series.eq("clean"), "footprint_m2"]
+                * df.loc[env_series.eq("clean"), "machines"]
             ).sum()
         )
-        base_indoor_iso8 = float(
+        base_indoor_dry = float(
             (
-                df.loc[env_series.eq("iso8"), "footprint_m2"]
-                * df.loc[env_series.eq("iso8"), "machines"]
+                df.loc[env_series.eq("dry"), "footprint_m2"]
+                * df.loc[env_series.eq("dry"), "machines"]
             ).sum()
         )
-        base_indoor_none = base_indoor_total - base_indoor_iso7 - base_indoor_iso8
+        base_indoor_none = base_indoor_total - base_indoor_clean - base_indoor_dry
 
         indoor_none = base_indoor_none * max(g.indoor_area_factor, 0.0)
-        indoor_iso7_raw = base_indoor_iso7 * max(g.indoor_area_factor, 0.0)
-        indoor_iso8_raw = base_indoor_iso8 * max(g.indoor_area_factor, 0.0)
-        indoor_iso7 = indoor_iso7_raw * max(g.iso7_area_multiplier, 0.0)
-        indoor_iso8 = indoor_iso8_raw * max(g.iso8_area_multiplier, 0.0)
+        indoor_clean_raw = base_indoor_clean * max(g.indoor_area_factor, 0.0)
+        indoor_dry_raw = base_indoor_dry * max(g.indoor_area_factor, 0.0)
+        indoor_clean = indoor_clean_raw * max(g.clean_area_multiplier, 0.0)
+        indoor_dry = indoor_dry_raw * max(g.dry_area_multiplier, 0.0)
 
-        required_indoor_area = indoor_none + indoor_iso7 + indoor_iso8
+        required_indoor_area = indoor_none + indoor_clean + indoor_dry
         required_outdoor_area = (
             required_indoor_area * max(g.outdoor_area_factor, 0.0)
         )
@@ -746,16 +746,16 @@ class BatteryCostModel:
 
         base_cost = max(g.building_cost_eur_per_m2, 0.0)
         cost_indoor_none = indoor_none * base_cost
-        cost_indoor_iso7 = (
-            indoor_iso7 * base_cost + indoor_iso7 * max(g.iso7_add_cost_eur_per_m2, 0.0)
+        cost_indoor_clean = (
+            indoor_clean * base_cost + indoor_clean * max(g.clean_add_cost_eur_per_m2, 0.0)
         )
-        cost_indoor_iso8 = (
-            indoor_iso8 * base_cost + indoor_iso8 * max(g.iso8_add_cost_eur_per_m2, 0.0)
+        cost_indoor_dry = (
+            indoor_dry * base_cost + indoor_dry * max(g.dry_add_cost_eur_per_m2, 0.0)
         )
         cost_outdoor = required_outdoor_area * base_cost
 
         building_value = (
-            cost_indoor_none + cost_indoor_iso7 + cost_indoor_iso8 + cost_outdoor
+            cost_indoor_none + cost_indoor_clean + cost_indoor_dry + cost_outdoor
         )
 
         annual_depr_equipment = (
@@ -953,14 +953,14 @@ class BatteryCostModel:
             "indirect_capex_eur": indirect_capex,
             "capital_equipment_total_eur": total_capital_equipment,
             "indoor_area_none_m2": indoor_none,
-            "indoor_area_iso7_m2": indoor_iso7,
-            "indoor_area_iso8_m2": indoor_iso8,
+            "indoor_area_clean_m2": indoor_clean,
+            "indoor_area_dry_m2": indoor_dry,
             "required_outdoor_area_m2": required_outdoor_area,
             "required_indoor_area_m2": required_indoor_area,
             "total_required_area_m2": total_required_area,
             "area_cost_indoor_none_eur": cost_indoor_none,
-            "area_cost_indoor_iso7_eur": cost_indoor_iso7,
-            "area_cost_indoor_iso8_eur": cost_indoor_iso8,
+            "area_cost_indoor_clean_eur": cost_indoor_clean,
+            "area_cost_indoor_dry_eur": cost_indoor_dry,
             "area_cost_outdoor_eur": cost_outdoor,
             "building_value_eur": building_value,
             "annual_depreciation_eur": annual_depreciation,
@@ -1676,10 +1676,10 @@ left_inputs = html.Div(
             [
                 html.Div(
                     [
-                        html.Label("ISO 7 area multiplier (×)"),
+                        html.Label("Clean room area multiplier (×)"),
                         num_input(
-                            "iso7_mult",
-                            DEFAULT_GENERAL["iso7_area_multiplier"],
+                            "clean_mult",
+                            DEFAULT_GENERAL["clean_area_multiplier"],
                             step="any",
                             min_=1.0,
                         ),
@@ -1687,10 +1687,10 @@ left_inputs = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Label("ISO 7 add-on cost (€/m²)"),
+                        html.Label("Clean room add-on cost (€/m²)"),
                         num_input(
-                            "iso7_add",
-                            DEFAULT_GENERAL["iso7_add_cost_eur_per_m2"],
+                            "clean_add",
+                            DEFAULT_GENERAL["clean_add_cost_eur_per_m2"],
                             step="any",
                             min_=0.0,
                         ),
@@ -1698,10 +1698,10 @@ left_inputs = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Label("ISO 8 area multiplier (×)"),
+                        html.Label("Dry room area multiplier (×)"),
                         num_input(
-                            "iso8_mult",
-                            DEFAULT_GENERAL["iso8_area_multiplier"],
+                            "dry_mult",
+                            DEFAULT_GENERAL["dry_area_multiplier"],
                             step="any",
                             min_=1.0,
                         ),
@@ -1709,10 +1709,10 @@ left_inputs = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Label("ISO 8 add-on cost (€/m²)"),
+                        html.Label("Dry room add-on cost (€/m²)"),
                         num_input(
-                            "iso8_add",
-                            DEFAULT_GENERAL["iso8_add_cost_eur_per_m2"],
+                            "dry_add",
+                            DEFAULT_GENERAL["dry_add_cost_eur_per_m2"],
                             step="any",
                             min_=0.0,
                         ),
@@ -1982,7 +1982,7 @@ left_inputs = html.Div(
                 {"name": "Order", "id": "order", "type": "numeric"},
                 {"name": "Process Step", "id": "step", "presentation": "input"},
                 {
-                    "name": "Environment (None/ISO7/ISO8)",
+                    "name": "Environment (None/Clean/Dry)",
                     "id": "env",
                     "presentation": "dropdown",
                 },
@@ -2028,8 +2028,8 @@ left_inputs = html.Div(
                 "env": {
                     "options": [
                         {"label": "None", "value": "none"},
-                        {"label": "ISO 7", "value": "iso7"},
-                        {"label": "ISO 8", "value": "iso8"},
+                        {"label": "Clean", "value": "clean"},
+                        {"label": "Dry", "value": "dry"},
                     ]
                 },
             },
@@ -2392,10 +2392,10 @@ def move_step(up_clicks, down_clicks, rows, sel_rows):
     Output("bldg_cost", "value", allow_duplicate=True),
     Output("indoor_factor", "value", allow_duplicate=True),
     Output("outdoor_factor", "value", allow_duplicate=True),
-    Output("iso7_mult", "value", allow_duplicate=True),
-    Output("iso7_add", "value", allow_duplicate=True),
-    Output("iso8_mult", "value", allow_duplicate=True),
-    Output("iso8_add", "value", allow_duplicate=True),
+    Output("clean_mult", "value", allow_duplicate=True),
+    Output("clean_add", "value", allow_duplicate=True),
+    Output("dry_mult", "value", allow_duplicate=True),
+    Output("dry_add", "value", allow_duplicate=True),
     Output("gwh", "value", allow_duplicate=True),
     Output("cell_ah", "value", allow_duplicate=True),
     Output("cell_wh", "value", allow_duplicate=True),
@@ -2456,10 +2456,10 @@ def apply_preset(n, preset_key):
         g["building_cost_eur_per_m2"],
         g["indoor_area_factor"],
         g["outdoor_area_factor"],
-        g["iso7_area_multiplier"],
-        g["iso7_add_cost_eur_per_m2"],
-        g["iso8_area_multiplier"],
-        g["iso8_add_cost_eur_per_m2"],
+        g["clean_area_multiplier"],
+        g["clean_add_cost_eur_per_m2"],
+        g["dry_area_multiplier"],
+        g["dry_add_cost_eur_per_m2"],
         g["annual_output_gwh"],
         g["cell_ah"],
         g["cell_wh"],
@@ -2534,10 +2534,10 @@ def sync_materials_intro_step(steps_rows, materials_rows):
     State("bldg_cost", "value"),
     State("indoor_factor", "value"),
     State("outdoor_factor", "value"),
-    State("iso7_mult", "value"),
-    State("iso7_add", "value"),
-    State("iso8_mult", "value"),
-    State("iso8_add", "value"),
+    State("clean_mult", "value"),
+    State("clean_add", "value"),
+    State("dry_mult", "value"),
+    State("dry_add", "value"),
     State("gwh", "value"),
     State("cell_ah", "value"),
     State("cell_wh", "value"),
@@ -2575,10 +2575,10 @@ def run_calc(
     bldg_cost,
     indoor_factor,
     outdoor_factor,
-    iso7_mult,
-    iso7_add,
-    iso8_mult,
-    iso8_add,
+    clean_mult,
+    clean_add,
+    dry_mult,
+    dry_add,
     gwh,
     cell_ah,
     cell_wh,
@@ -2632,17 +2632,17 @@ def run_calc(
         outdoor_area_factor=float(
             outdoor_factor or DEFAULT_GENERAL["outdoor_area_factor"]
         ),
-        iso7_area_multiplier=float(
-            iso7_mult or DEFAULT_GENERAL["iso7_area_multiplier"]
+        clean_area_multiplier=float(
+            clean_mult or DEFAULT_GENERAL["clean_area_multiplier"]
         ),
-        iso7_add_cost_eur_per_m2=float(
-            iso7_add or DEFAULT_GENERAL["iso7_add_cost_eur_per_m2"]
+        clean_add_cost_eur_per_m2=float(
+            clean_add or DEFAULT_GENERAL["clean_add_cost_eur_per_m2"]
         ),
-        iso8_area_multiplier=float(
-            iso8_mult or DEFAULT_GENERAL["iso8_area_multiplier"]
+        dry_area_multiplier=float(
+            dry_mult or DEFAULT_GENERAL["dry_area_multiplier"]
         ),
-        iso8_add_cost_eur_per_m2=float(
-            iso8_add or DEFAULT_GENERAL["iso8_add_cost_eur_per_m2"]
+        dry_add_cost_eur_per_m2=float(
+            dry_add or DEFAULT_GENERAL["dry_add_cost_eur_per_m2"]
         ),
         annual_output_gwh=float(gwh or DEFAULT_GENERAL["annual_output_gwh"]),
         cell_ah=float(resolved_ah),
@@ -2755,9 +2755,9 @@ def run_calc(
             f"{k['price_per_kwh_eur']:.2f}",
             " €/kWh",
         ),
-        card("Indoor (non-dry)", f"{k['indoor_area_none_m2']:.0f}", " m²"),
-        card("Indoor ISO 7", f"{k['indoor_area_iso7_m2']:.0f}", " m²"),
-        card("Indoor ISO 8", f"{k['indoor_area_iso8_m2']:.0f}", " m²"),
+        card("Indoor (standard)", f"{k['indoor_area_none_m2']:.0f}", " m²"),
+        card("Clean room", f"{k['indoor_area_clean_m2']:.0f}", " m²"),
+        card("Dry room", f"{k['indoor_area_dry_m2']:.0f}", " m²"),
         card("Outdoor", f"{k['required_outdoor_area_m2']:.0f}", " m²"),
         card(
             "Total Required Area",
@@ -2770,13 +2770,13 @@ def run_calc(
             " M€",
         ),
         card(
-            "Cost indoor ISO 7",
-            f"{k['area_cost_indoor_iso7_eur'] / 1e6:.2f}",
+            "Cost clean room",
+            f"{k['area_cost_indoor_clean_eur'] / 1e6:.2f}",
             " M€",
         ),
         card(
-            "Cost indoor ISO 8",
-            f"{k['area_cost_indoor_iso8_eur'] / 1e6:.2f}",
+            "Cost dry Room",
+            f"{k['area_cost_indoor_dry_eur'] / 1e6:.2f}",
             " M€",
         ),
         card(
@@ -2828,4 +2828,5 @@ def run_calc(
 if __name__ == "__main__":
     # NOTE: set debug=False in production deployments.
     app.run(debug=True)
+
 
