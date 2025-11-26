@@ -1,9 +1,10 @@
 """
-Cell Manufacturing Cost Estimator (refactored)
+Cell Manufacturing Cost Estimator
 """
 
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Any
+from collections import deque  # used for O(1) pops in topological sort
 import copy
 import math
 import os
@@ -14,6 +15,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, html, dcc, Input, Output, State, dash_table, ctx
+
 
 # ============================================================
 # Defaults & Presets
@@ -26,229 +28,345 @@ def _derive_ah_v_from_kwh(kwh: float, v: float = 3.7) -> Tuple[float, float]:
     return ah, v
 
 
+# ============================================================
+# Column names used for cell process steps
+# ============================================================
+
+CELL_COLS = {
+    # Internal canonical column names used throughout the app/model.
+    # Keeping this indirection makes it easy to change names in one place
+    # if you ever align with an external CSV or a different DataFrame schema.
+    "id": "step_id",
+    "step": "step",
+    "lead_time_s": "lead_time_s",
+    "scrap_rate": "scrap_rate",
+    "kw_per_unit": "kw_per_unit",
+    "spec_workers_per_machine": "spec_workers_per_machine",
+    "supp_workers_per_machine": "supp_workers_per_machine",
+    "capex_meur_per_machine": "capex_meur_per_machine",
+    "env": "env",
+    "footprint_m2": "footprint_m2",
+    # DAG connectivity: comma-separated successors & fractions
+    "succ": "succ",
+    "succ_frac": "succ_frac",
+}
+
+
 # --- Default process steps (used as template for all presets) -----------------
-DEFAULT_STEPS: List[Dict[str, Any]] = [
+
+DEFAULT_STEPS = [
     {
-        "step": "Mixing",
-        "lead_time_s": 0.017,
-        "scrap_rate": 0.01,
-        "capex_meur_per_machine": 1.08,
-        "footprint_m2": 24,
-        "kw_per_unit": 20.0,
-        "env": "none",
-        "spec_workers_per_machine": 0.5,
-        "supp_workers_per_machine": 0,
-        "machines": 18,  # initial guess; will be recalculated in model
+        CELL_COLS["id"]: "MIX_C",
+        CELL_COLS["step"]: "Cathode Mixing",
+        CELL_COLS["lead_time_s"]: 0.017,
+        CELL_COLS["scrap_rate"]: 0.01,
+        CELL_COLS["kw_per_unit"]: 20.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.5,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 1.08,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 24,
+        CELL_COLS["succ"]: "COAT_C",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Coating",
-        "lead_time_s": 0.02325,
-        "scrap_rate": 0.0,
-        "capex_meur_per_machine": 37.8,
-        "footprint_m2": 300,
-        "kw_per_unit": 75.0,
-        "env": "clean",
-        "spec_workers_per_machine": 1,
-        "supp_workers_per_machine": 0,
-        "machines": 6,
+        CELL_COLS["id"]: "COAT_C",
+        CELL_COLS["step"]: "Cathode Coating",
+        CELL_COLS["lead_time_s"]: 0.02325,
+        CELL_COLS["scrap_rate"]: 0.00,
+        CELL_COLS["kw_per_unit"]: 75.0,
+        CELL_COLS["spec_workers_per_machine"]: 1.0,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 37.8,
+        CELL_COLS["env"]: "clean",
+        CELL_COLS["footprint_m2"]: 300,
+        CELL_COLS["succ"]: "CAL_C",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Calendering",
-        "lead_time_s": 0.02325,
-        "scrap_rate": 0.0,
-        "capex_meur_per_machine": 2.9,
-        "footprint_m2": 24,
-        "kw_per_unit": 60.0,
-        "env": "none",
-        "spec_workers_per_machine": 0.5,
-        "supp_workers_per_machine": 0,
-        "machines": 6,
+        CELL_COLS["id"]: "CAL_C",
+        CELL_COLS["step"]: "Cathode Calendering",
+        CELL_COLS["lead_time_s"]: 0.02325,
+        CELL_COLS["scrap_rate"]: 0.00,
+        CELL_COLS["kw_per_unit"]: 60.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.5,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 2.9,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 24,
+        CELL_COLS["succ"]: "SLIT_C",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Slitting",
-        "lead_time_s": 0.02325,
-        "scrap_rate": 0.0,
-        "capex_meur_per_machine": 1.15,
-        "footprint_m2": 24,
-        "kw_per_unit": 45.0,
-        "env": "none",
-        "spec_workers_per_machine": 0,
-        "supp_workers_per_machine": 0,
-        "machines": 6,
+        CELL_COLS["id"]: "SLIT_C",
+        CELL_COLS["step"]: "Cathode Slitting",
+        CELL_COLS["lead_time_s"]: 0.02325,
+        CELL_COLS["scrap_rate"]: 0.00,
+        CELL_COLS["kw_per_unit"]: 45.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.0,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 1.15,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 24,
+        CELL_COLS["succ"]: "VAC",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Vacuum Drying",
-        "lead_time_s": 0.02325,
-        "scrap_rate": 0.0,
-        "capex_meur_per_machine": 1.2,
-        "footprint_m2": 11,
-        "kw_per_unit": 56.0,
-        "env": "none",
-        "spec_workers_per_machine": 0.1,
-        "supp_workers_per_machine": 0,
-        "machines": 12,
+        CELL_COLS["id"]: "MIX_A",
+        CELL_COLS["step"]: "Anode Mixing",
+        CELL_COLS["lead_time_s"]: 0.017,
+        CELL_COLS["scrap_rate"]: 0.01,
+        CELL_COLS["kw_per_unit"]: 20.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.5,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 1.08,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 24,
+        CELL_COLS["succ"]: "COAT_A",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Contacting",
-        "lead_time_s": 3,
-        "scrap_rate": 0.0010,
-        "capex_meur_per_machine": 5.0,
-        "footprint_m2": 12,
-        "kw_per_unit": 5.0,
-        "env": "none",
-        "spec_workers_per_machine": 0.2,
-        "supp_workers_per_machine": 0.0,
-        "machines": 37,
+        CELL_COLS["id"]: "COAT_A",
+        CELL_COLS["step"]: "Anode Coating",
+        CELL_COLS["lead_time_s"]: 0.02325,
+        CELL_COLS["scrap_rate"]: 0.00,
+        CELL_COLS["kw_per_unit"]: 75.0,
+        CELL_COLS["spec_workers_per_machine"]: 1.0,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 37.8,
+        CELL_COLS["env"]: "clean",
+        CELL_COLS["footprint_m2"]: 300,
+        CELL_COLS["succ"]: "CAL_A",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Winding",
-        "lead_time_s": 1.50,
-        "scrap_rate": 0.006,
-        "capex_meur_per_machine": 0.80,
-        "footprint_m2": 12,
-        "kw_per_unit": 25.0,
-        "env": "clean",
-        "spec_workers_per_machine": 0.5,
-        "supp_workers_per_machine": 0.0,
-        "machines": 23,
+        CELL_COLS["id"]: "CAL_A",
+        CELL_COLS["step"]: "Anode Calendering",
+        CELL_COLS["lead_time_s"]: 0.02325,
+        CELL_COLS["scrap_rate"]: 0.00,
+        CELL_COLS["kw_per_unit"]: 60.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.5,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 2.9,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 24,
+        CELL_COLS["succ"]: "SLIT_A",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Insert in Housing",
-        "lead_time_s": 0.60,
-        "scrap_rate": 0.0015,
-        "capex_meur_per_machine": 2.5,
-        "footprint_m2": 93,
-        "kw_per_unit": 117.50,
-        "env": "clean",
-        "spec_workers_per_machine": 1.25,
-        "supp_workers_per_machine": 0.0,
-        "machines": 12,
+        CELL_COLS["id"]: "SLIT_A",
+        CELL_COLS["step"]: "Anode Slitting",
+        CELL_COLS["lead_time_s"]: 0.02325,
+        CELL_COLS["scrap_rate"]: 0.00,
+        CELL_COLS["kw_per_unit"]: 45.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.0,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 1.15,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 24,
+        CELL_COLS["succ"]: "VAC",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Electrolyte Fill",
-        "lead_time_s": 2,
-        "scrap_rate": 0.001,
-        "capex_meur_per_machine": 1.0,
-        "footprint_m2": 60,
-        "kw_per_unit": 22.0,
-        "env": "dry",
-        "spec_workers_per_machine": 0.66,
-        "supp_workers_per_machine": 0.0,
-        "machines": 25,
+        CELL_COLS["id"]: "VAC",
+        CELL_COLS["step"]: "Vacuum Drying",
+        CELL_COLS["lead_time_s"]: 0.02325,
+        CELL_COLS["scrap_rate"]: 0.00,
+        CELL_COLS["kw_per_unit"]: 56.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.1,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 1.2,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 11,
+        CELL_COLS["succ"]: "CONT",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Formation",
-        "lead_time_s": 177.1875,
-        "scrap_rate": 0.005,
-        "capex_meur_per_machine": 0.01,
-        "footprint_m2": 5,
-        "kw_per_unit": 10.0,
-        "env": "none",
-        "spec_workers_per_machine": 0.005,
-        "supp_workers_per_machine": 0.0,
-        "machines": 167,
+        CELL_COLS["id"]: "CONT",
+        CELL_COLS["step"]: "Contacting",
+        CELL_COLS["lead_time_s"]: 3.0,
+        CELL_COLS["scrap_rate"]: 0.0010,
+        CELL_COLS["kw_per_unit"]: 56.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.2,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 5.0,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 12,
+        CELL_COLS["succ"]: "WIND",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Ageing",
-        "lead_time_s": 270,
-        "scrap_rate": 0.0,
-        "capex_meur_per_machine": 0.005,
-        "footprint_m2": 5,
-        "kw_per_unit": 10.0,
-        "env": "none",
-        "spec_workers_per_machine": 0.002,
-        "supp_workers_per_machine": 0.0,
-        "machines": 225,
+        CELL_COLS["id"]: "WIND",
+        CELL_COLS["step"]: "Winding",
+        CELL_COLS["lead_time_s"]: 1.50,
+        CELL_COLS["scrap_rate"]: 0.006,
+        CELL_COLS["kw_per_unit"]: 25.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.5,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 0.80,
+        CELL_COLS["env"]: "clean",
+        CELL_COLS["footprint_m2"]: 12,
+        CELL_COLS["succ"]: "INSRT",
+        CELL_COLS["succ_frac"]: "1",
     },
     {
-        "step": "Final EoL Test",
-        "lead_time_s": 0.9375,
-        "scrap_rate": 0.025,
-        "capex_meur_per_machine": 0.005,
-        "footprint_m2": 5,
-        "kw_per_unit": 10.0,
-        "env": "none",
-        "spec_workers_per_machine": 0.005,
-        "supp_workers_per_machine": 0.0,
-        "machines": 60,
+        CELL_COLS["id"]: "INSRT",
+        CELL_COLS["step"]: "Insert in Housing",
+        CELL_COLS["lead_time_s"]: 0.60,
+        CELL_COLS["scrap_rate"]: 0.0015,
+        CELL_COLS["kw_per_unit"]: 117.50,
+        CELL_COLS["spec_workers_per_machine"]: 1.25,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 2.5,
+        CELL_COLS["env"]: "clean",
+        CELL_COLS["footprint_m2"]: 93,
+        CELL_COLS["succ"]: "FILL",
+        CELL_COLS["succ_frac"]: "1",
+    },
+    {
+        CELL_COLS["id"]: "FILL",
+        CELL_COLS["step"]: "Electrolyte Fill",
+        CELL_COLS["lead_time_s"]: 2.0,
+        CELL_COLS["scrap_rate"]: 0.001,
+        CELL_COLS["kw_per_unit"]: 22.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.66,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 1.0,
+        CELL_COLS["env"]: "dry",
+        CELL_COLS["footprint_m2"]: 60,
+        CELL_COLS["succ"]: "FORM",
+        CELL_COLS["succ_frac"]: "1",
+    },
+    {
+        CELL_COLS["id"]: "FORM",
+        CELL_COLS["step"]: "Formation",
+        CELL_COLS["lead_time_s"]: 177.1875,
+        CELL_COLS["scrap_rate"]: 0.005,
+        CELL_COLS["kw_per_unit"]: 10.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.005,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 0.01,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 5,
+        CELL_COLS["succ"]: "AGE",
+        CELL_COLS["succ_frac"]: "1",
+    },
+    {
+        CELL_COLS["id"]: "AGE",
+        CELL_COLS["step"]: "Ageing",
+        CELL_COLS["lead_time_s"]: 270.0,
+        CELL_COLS["scrap_rate"]: 0.0,
+        CELL_COLS["kw_per_unit"]: 10.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.002,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 0.005,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 5,
+        CELL_COLS["succ"]: "FIN",
+        CELL_COLS["succ_frac"]: "1",
+    },
+    {
+        CELL_COLS["id"]: "FIN",
+        CELL_COLS["step"]: "Final EoL Test",
+        CELL_COLS["lead_time_s"]: 0.9375,
+        CELL_COLS["scrap_rate"]: 0.025,
+        CELL_COLS["kw_per_unit"]: 10.0,
+        CELL_COLS["spec_workers_per_machine"]: 0.005,
+        CELL_COLS["supp_workers_per_machine"]: 0.0,
+        CELL_COLS["capex_meur_per_machine"]: 0.005,
+        CELL_COLS["env"]: "none",
+        CELL_COLS["footprint_m2"]: 5,
+        CELL_COLS["succ"]: "",
+        CELL_COLS["succ_frac"]: "",
     },
 ]
 
+# Deterministic ordering for UI; DAG connectivity is defined via succ / succ_frac.
 for i, r in enumerate(DEFAULT_STEPS, start=1):
-    r["order"] = i  # deterministic ordering
+    r["order"] = i
+
+# Pre-compute a user-facing successor label ("successor_step") from the internal succ field
+id_key = CELL_COLS["id"]
+step_key = CELL_COLS["step"]
+succ_key = CELL_COLS["succ"]
+
+_id_to_step = {r[id_key]: r[step_key] for r in DEFAULT_STEPS}
+for r in DEFAULT_STEPS:
+    succ_raw = str(r.get(succ_key, "") or "").strip()
+    if not succ_raw:
+        r["successor_step"] = ""
+        continue
+    parts = [s.strip() for s in succ_raw.split(",") if s.strip()]
+    succ_names = [_id_to_step.get(p, p) for p in parts]
+    # For now we assume a single successor per UI; multiple successors will show as comma-separated names
+    r["successor_step"] = ", ".join(succ_names)
 
 
 # --- Default raw materials (used as template for all presets) -----------------
+
 DEFAULT_RAW_MATERIALS: List[Dict[str, Any]] = [
     {
         "name": "NMC",
-        "intro_step": "Mixing",
+        "intro_step": "Cathode Mixing",
         "pricing_unit": "kg",
         "g_per_cell": 128.0,
         "eur_per_kg": 25.0,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.922,
     },
     {
         "name": "Graphite+Si",
-        "intro_step": "Mixing",
+        "intro_step": "Anode Mixing",
         "pricing_unit": "kg",
         "g_per_cell": 65.38,
         "eur_per_kg": 5.42,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.922,
     },
     {
         "name": "Conductive Carbon",
-        "intro_step": "Mixing",
+        "intro_step": "Cathode Mixing",
         "pricing_unit": "kg",
         "g_per_cell": 4.0,
         "eur_per_kg": 3.0,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.922,
     },
     {
         "name": "Binder (PVDF/CMC/SBR)",
-        "intro_step": "Mixing",
+        "intro_step": "Cathode Mixing",
         "pricing_unit": "kg",
         "g_per_cell": 6.0,
         "eur_per_kg": 13.59,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.922,
     },
     {
         "name": "Solvent (NMP)",
-        "intro_step": "Mixing",
+        "intro_step": "Cathode Mixing",
         "pricing_unit": "kg",
         "g_per_cell": 2.0,
         "eur_per_kg": 2.7,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.995,
     },
     {
         "name": "Aluminum Foil (CC)",
-        "intro_step": "Coating",
+        "intro_step": "Cathode Coating",
         "pricing_unit": "kg",
         "g_per_cell": 22.0,
         "eur_per_kg": 4.87,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.865,
     },
     {
         "name": "Copper Foil (CC)",
-        "intro_step": "Coating",
+        "intro_step": "Anode Coating",
         "pricing_unit": "kg",
         "g_per_cell": 34.0,
         "eur_per_kg": 12.3,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.865,
     },
     {
         "name": "Separator",
@@ -258,7 +376,6 @@ DEFAULT_RAW_MATERIALS: List[Dict[str, Any]] = [
         "eur_per_kg": 0.0,
         "area_per_cell_m2": 0.07,
         "eur_per_m2": 0.26,
-        "total_yield": 0.980,
     },
     {
         "name": "Cell Case",
@@ -268,7 +385,6 @@ DEFAULT_RAW_MATERIALS: List[Dict[str, Any]] = [
         "eur_per_kg": 0.0,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.990,
     },
     {
         "name": "Electrolyte",
@@ -278,13 +394,12 @@ DEFAULT_RAW_MATERIALS: List[Dict[str, Any]] = [
         "eur_per_kg": 5.39,
         "area_per_cell_m2": 0.0,
         "eur_per_m2": 0.0,
-        "total_yield": 0.990,
     },
 ]
 
+
 # --- Presets (all defaults live here) ----------------------------------------
 
-# Baseline NMC 4680
 nmca_v = _derive_ah_v_from_kwh(0.0927, 3.7)
 NMC_CELL_AH, NMC_CELL_V = nmca_v
 NMC_CELL_WH = NMC_CELL_AH * NMC_CELL_V
@@ -293,7 +408,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     "NMC 4680 (Baseline)": {
         "general": {
             "electricity_price_eur_per_kwh": 0.1589,
-            "baseline_building_kwh": 101.8,  # baseline building load (kW)
+            "baseline_building_kwh": 101.8,  # baseline building load (kWh/m²/a)
             "specialist_labor_eur_per_h": 44.0,
             "support_labor_eur_per_h": 0.0,
             "building_cost_eur_per_m2": 3360.0,
@@ -321,12 +436,12 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "ramp_years": 1,
             "capital_cost_wacc": 0.06,
             "desired_margin": 0.15,
-            # New overhead factors (relative to direct labor or assets)
+            # Overhead factors (relative to direct labor or assets)
             "indirect_personnel_factor": 0.25,
             "logistics_personnel_factor": 0.15,
             "building_maintenance_factor": 0.02,  # of building CAPEX per year
             "machine_maintenance_factor": 0.03,   # of equipment CAPEX per year
-            # New investment factors (multipliers on equipment CAPEX)
+            # Investment factors (multipliers on equipment CAPEX)
             "logistics_investment_factor": 0.05,
             "indirect_investment_factor": 0.10,
         },
@@ -425,13 +540,14 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# Ensure deterministic ordering on preset step lists
+# Ensure deterministic ordering on preset step lists and presence of successor_step
 for preset in PRESETS.values():
     if "steps" in preset:
         for i, r in enumerate(preset["steps"], start=1):
             r.setdefault("order", i)
+            # successor_step is UI-facing; DAG uses "succ"/"succ_frac"
+            r.setdefault("successor_step", r.get("successor_step", ""))
 
-# Base preset used for initial UI defaults and fallback values
 DEFAULT_PRESET_KEY = "NMC 4680 (Baseline)"
 DEFAULT_GENERAL = PRESETS[DEFAULT_PRESET_KEY]["general"]
 DEFAULT_ECON = PRESETS[DEFAULT_PRESET_KEY]["econ"]
@@ -449,6 +565,7 @@ def _resolve_cell_params(
     - If all three provided -> trust Ah & V, recompute Wh = Ah * V for consistency.
     - If fewer than two -> fall back to preset defaults.
     """
+
     def _to_pos_or_none(val: Any) -> float | None:
         try:
             f = float(val)
@@ -460,14 +577,10 @@ def _resolve_cell_params(
     wh = _to_pos_or_none(wh_in)
     v = _to_pos_or_none(v_in)
 
-    provided = {
-        "ah": ah is not None,
-        "wh": wh is not None,
-        "v": v is not None,
-    }
+    provided = {"ah": ah is not None, "wh": wh is not None, "v": v is not None}
     count = sum(provided.values())
 
-    # start from defaults
+    # Start from defaults
     ah_res = ah if ah is not None else float(default_gen["cell_ah"])
     wh_res = wh if wh is not None else float(default_gen["cell_wh"])
     v_res = v if v is not None else float(default_gen["cell_voltage"])
@@ -483,10 +596,271 @@ def _resolve_cell_params(
             # Ah and Wh provided
             v_res = wh_res / ah_res if ah_res > 0 else float(default_gen["cell_voltage"])
         else:
-            # all three provided: keep Ah & V authoritative
+            # All three provided: keep Ah & V authoritative
             wh_res = ah_res * v_res
 
     return ah_res, wh_res, v_res
+
+
+# ============================================================
+# DAG helpers: parse successors, build graph, simulate unit flow
+# ============================================================
+
+def _parse_successors(successors_str: Any, fractions_str: Any) -> List[Tuple[str, float]]:
+    """
+    Parse comma-separated successors and fractions into a normalized list.
+
+    Examples:
+        "A,B", "0.7,0.3" -> [("A", 0.7), ("B", 0.3)]
+        "A,B", ""        -> [("A", 0.5), ("B", 0.5)]
+    """
+    if not isinstance(successors_str, str) or not successors_str.strip():
+        return []
+
+    ids = [s.strip() for s in successors_str.split(",") if s.strip()]
+    if not ids:
+        return []
+
+    # No fractions -> equal split
+    if not isinstance(fractions_str, str) or not fractions_str.strip():
+        frac = 1.0 / len(ids)
+        return [(sid, frac) for sid in ids]
+
+    fracs_raw: List[float] = []
+    for tok in fractions_str.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            fracs_raw.append(float(tok))
+        except ValueError:
+            fracs_raw.append(float("nan"))
+
+    # Pad / trim to same length as ids
+    if len(fracs_raw) < len(ids):
+        fracs_raw += [0.0] * (len(ids) - len(fracs_raw))
+    fracs_raw = fracs_raw[: len(ids)]
+
+    # Normalize only finite values; if sum<=0, fall back to equal split
+    s = sum(f for f in fracs_raw if np.isfinite(f))
+    if s <= 0:
+        frac = 1.0 / len(ids)
+        return [(sid, frac) for sid in ids]
+
+    fracs = [(f / s) if np.isfinite(f) else 0.0 for f in fracs_raw]
+    return list(zip(ids, fracs))
+
+
+def _build_graph(
+    df: pd.DataFrame,
+    id_col: str,
+    succ_col: str,
+    frac_col: str,
+) -> Dict[str, Any]:
+    """
+    Build a DAG from the step table.
+
+    Returns a dict with:
+      "ids":   [step_ids],
+      "succ":  {sid: [(succ_id, frac), ...]},
+      "pred":  {sid: [pred_ids]},
+      "roots": [root_ids],         # steps without predecessors in the DAG
+      "root":  root_id,            # first root (kept for backwards compatibility)
+      "sinks": [sink_ids],         # steps without successors
+      "topo":  [ids in topological order],
+    """
+    ids = df[id_col].astype(str).tolist()
+    if len(ids) != len(set(ids)):
+        raise ValueError("Step IDs must be unique for DAG construction.")
+
+    succ: Dict[str, List[Tuple[str, float]]] = {sid: [] for sid in ids}
+    pred: Dict[str, List[str]] = {sid: [] for sid in ids}
+
+    for _, row in df.iterrows():
+        sid = str(row[id_col])
+        s_list = _parse_successors(row.get(succ_col, ""), row.get(frac_col, ""))
+        for tid, frac in s_list:
+            if tid not in succ:
+                # Ignore dangling edges (helps when user references missing steps).
+                continue
+            succ[sid].append((tid, frac))
+            pred[tid].append(sid)
+
+    roots = [sid for sid in ids if not pred[sid]]
+    sinks = [sid for sid in ids if not succ[sid]]
+
+    if not roots:
+        raise ValueError("No root step found (every step has at least one predecessor).")
+
+    # Kahn's algorithm for topological order using deque for performance
+    in_deg = {sid: len(pred[sid]) for sid in ids}
+    queue = deque([sid for sid in ids if in_deg[sid] == 0])
+    topo: List[str] = []
+
+    while queue:
+        n = queue.popleft()
+        topo.append(n)
+        for m, _frac in succ[n]:
+            in_deg[m] -= 1
+            if in_deg[m] == 0:
+                queue.append(m)
+
+    if len(topo) != len(ids):
+        raise ValueError("Process graph has at least one cycle; only DAGs are supported.")
+
+    return {
+        "ids": ids,
+        "succ": succ,
+        "pred": pred,
+        "roots": roots,
+        "root": roots[0],  # kept for backwards compatibility; prefer "roots"
+        "sinks": sinks,
+        "topo": topo,
+    }
+
+
+def _simulate_unit_flow(
+    df: pd.DataFrame,
+    graph: Dict[str, Any],
+    root_ids: List[str] | None,
+    id_col: str,
+    scrap_col: str,
+) -> Tuple[
+    Dict[str, float],
+    Dict[str, float],
+    Dict[str, float],
+    Dict[Tuple[str, str], float],
+    float,
+]:
+    """
+    Simulate the flow of unit(s) entering the DAG.
+
+    - If root_ids is None, one unit is injected into *each* root in graph["roots"].
+      This is what we use for the main line sizing so that multiple start points
+      (parallel process branches) are all active.
+    - If a specific list is provided, one unit is injected into each of those
+      steps. This is used for material survival from an intro step.
+
+    Returns:
+      flow_in[step]:     units entering each step per unit configuration
+      good_out[step]:    good units leaving each step to successors
+      scrap_amt[step]:   units scrapped at each step
+      edge_good[(i,j)]:  good units on each edge
+      final_good:        total final-good units (aggregated across all sinks)
+    """
+    ids = graph["ids"]
+    succ = graph["succ"]
+
+    rows = {str(r[id_col]): r for _, r in df.iterrows()}
+
+    flow_in: Dict[str, float] = {sid: 0.0 for sid in ids}
+    good_out: Dict[str, float] = {sid: 0.0 for sid in ids}
+    scrap_amt: Dict[str, float] = {sid: 0.0 for sid in ids}
+    edge_good: Dict[Tuple[str, str], float] = {}
+
+    # Resolve which roots to inject into
+    if root_ids is None:
+        active_roots = list(graph.get("roots", []))
+    elif isinstance(root_ids, str):
+        active_roots = [root_ids]
+    else:
+        active_roots = list(root_ids)
+
+    if not active_roots:
+        raise ValueError("No root steps supplied for unit-flow simulation.")
+
+    for rid in active_roots:
+        if rid not in flow_in:
+            raise KeyError(f"Unknown root step id '{rid}' in unit-flow simulation.")
+        flow_in[rid] += 1.0
+
+    final_good = 0.0
+
+    for sid in graph["topo"]:
+        row = rows[sid]
+        scrap_rate = float(row.get(scrap_col, 0.0) or 0.0)
+        scrap_rate = min(max(scrap_rate, 0.0), 1.0)
+
+        fin = flow_in[sid]
+        good = fin * (1.0 - scrap_rate)
+        scrap = fin - good
+
+        good_out[sid] = good
+        scrap_amt[sid] = scrap
+
+        if succ[sid]:
+            remaining = good
+            for tid, frac in succ[sid]:
+                amt = good * frac
+                remaining -= amt
+                flow_in[tid] += amt
+                edge_good[(sid, tid)] = edge_good.get((sid, tid), 0.0) + amt
+            # Any tiny leftover is "final good" that doesn't go to another step
+            final_good += max(0.0, remaining)
+        else:
+            # No successors ⇒ this step's good output is final
+            final_good += good
+
+    return flow_in, good_out, scrap_amt, edge_good, final_good
+
+
+def _apply_successor_ui_to_graph(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    If a user-facing 'successor_step' column is present, derive the internal
+    DAG fields 'succ' and 'succ_frac' from it.
+
+    - Values in 'successor_step' are step names (or comma-separated list of
+      names/IDs). The function maps them to step_ids.
+    - Empty or 'End' (value == "") means "no successor" (sink step).
+    - For multiple successors, fractions are distributed equally for now.
+    """
+    if "successor_step" not in df.columns:
+        return df
+
+    df = df.copy()
+
+    # Build name -> ID mapping once
+    name_to_sid: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        step_name = str(row.get("step", "")).strip()
+        sid = str(row.get("step_id", "")).strip()
+        if step_name:
+            # First occurrence of a name wins (stable mapping)
+            name_to_sid.setdefault(step_name, sid)
+
+    succ_values: List[str] = []
+    frac_values: List[str] = []
+
+    for _, row in df.iterrows():
+        raw = row.get("successor_step", "")
+        raw = "" if raw is None else str(raw).strip()
+
+        if not raw:
+            # "End" or blank -> sink step
+            succ_values.append("")
+            frac_values.append("")
+            continue
+
+        # Allow comma-separated list of successors in the UI for advanced cases
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        succ_ids: List[str] = []
+        for p in parts:
+            # Map step name -> step_id; fall back to literal if not found
+            succ_ids.append(name_to_sid.get(p, p))
+
+        succ_str = ",".join(succ_ids)
+        succ_values.append(succ_str)
+
+        n = len(succ_ids)
+        if n == 0:
+            frac_values.append("")
+        else:
+            frac_each = 1.0 / n
+            frac_values.append(",".join([f"{frac_each:g}"] * n))
+
+    df["succ"] = succ_values
+    df["succ_frac"] = frac_values
+    return df
 
 
 # ============================================================
@@ -526,12 +900,12 @@ class Economics:
     ramp_years: int
     capital_cost_wacc: float
     desired_margin: float
-    # New explicit overhead factors
+    # Overhead factors
     indirect_personnel_factor: float
     logistics_personnel_factor: float
     building_maintenance_factor: float
     machine_maintenance_factor: float
-    # New investment factors
+    # Investment factors
     logistics_investment_factor: float
     indirect_investment_factor: float
 
@@ -539,14 +913,15 @@ class Economics:
 @dataclass
 class BatteryCostModel:
     """
-    Encapsulates the core cell manufacturing cost model.
+    Encapsulates the DAG-based cell manufacturing cost model.
 
-    The model:
-    - Computes line takt from annual output and available hours
-    - Sizes machines by lead time & scrap
-    - Allocates materials, labor, energy, area, and CAPEX
-    - Applies explicit overhead & maintenance factors
-    - Produces KPIs and time-series cashflows
+    - Uses lead_time_s + DAG flows to size machines and capacity.
+    - Materials survival is computed from actual process scrap from the
+      intro step to final good output via re-simulation on the DAG.
+    - DAG supports multiple start points (roots) feeding a single conceptual
+      final-good node (aggregated over all sinks).
+    - Process topology is strictly defined via "successors" from the UI
+      (successor_step -> succ/succ_frac).
     """
 
     general: GeneralAssumptions
@@ -556,100 +931,249 @@ class BatteryCostModel:
 
     def compute(self) -> Dict[str, Any]:
         g, e = self.general, self.econ
+
+        # ------------------------------------------------------------------
+        # 1) Normalize step table and ensure required columns
+        # ------------------------------------------------------------------
         df = self.steps.copy().reset_index(drop=True)
 
-        if "order" in df.columns:
-            df = df.sort_values("order").reset_index(drop=True)
+        for col, default in [
+            ("step", ""),
+            ("step_id", None),
+            ("env", "none"),
+            ("lead_time_s", 1.0),
+            ("scrap_rate", 0.0),
+            ("kw_per_unit", 0.0),
+            ("spec_workers_per_machine", 0.0),
+            ("supp_workers_per_machine", 0.0),
+            ("capex_meur_per_machine", 0.0),
+            ("footprint_m2", 0.0),
+            ("successor_step", ""),  # UI-facing successor label
+            ("succ", ""),            # internal DAG successors (step_ids)
+            ("succ_frac", ""),       # internal DAG successor fractions
+            ("order", None),
+        ]:
+            if col not in df.columns:
+                df[col] = default
 
-        # ----------------------------------------------------------
-        # 1) Available time & line cycle time ("takt")
-        # ----------------------------------------------------------
+        df["step"] = df["step"].astype(str).replace({"nan": ""})
+
+        # If no explicit step_id, derive stable IDs from names
+        if df["step_id"].isna().all():
+            df["step_id"] = [
+                f"S{i+1:03d}" if not name else str(name).replace(" ", "_").upper()
+                for i, name in enumerate(df["step"])
+            ]
+        else:
+            df["step_id"] = df["step_id"].fillna("").astype(str)
+            df.loc[df["step_id"] == "", "step_id"] = [
+                f"S{i+1:03d}" for i in range(len(df))
+            ]
+
+        # Enforce uniqueness of IDs
+        if df["step_id"].duplicated().any():
+            seen: Dict[str, int] = {}
+            new_ids: List[str] = []
+            for sid in df["step_id"]:
+                base = sid or "S"
+                count = seen.get(base, 0) + 1
+                seen[base] = count
+                new_ids.append(f"{base}_{count}" if count > 1 else base)
+            df["step_id"] = new_ids
+
+        # Keep stable UI order
+        if df["order"].isna().any():
+            df["order"] = range(1, len(df) + 1)
+        df = df.sort_values("order").reset_index(drop=True)
+
+        # Derive internal DAG connectivity from the UI-facing successor_step
+        df = _apply_successor_ui_to_graph(df)
+
+        # ------------------------------------------------------------------
+        # 2) Time base and annual volume target
+        # ------------------------------------------------------------------
+        oee = max(min(g.oee, 1.0), 0.0)
         hours_year = g.working_days * g.shifts_per_day * g.shift_hours
-        avail_time_seconds = hours_year * 3600.0 * g.oee
+        avail_time_seconds = hours_year * 3600.0 * oee
 
-        # Prefer Wh from assumptions; fall back to Ah * V if needed
         cell_wh = g.cell_wh if g.cell_wh > 0 else g.cell_ah * g.cell_voltage
         cell_wh = max(cell_wh, 1e-9)
         cell_kwh = cell_wh / 1000.0
 
         final_cells_required = (g.annual_output_gwh * 1_000_000.0) / cell_kwh
-        line_cycle_time_s = avail_time_seconds / max(final_cells_required, 1.0)
 
-        # ----------------------------------------------------------
-        # 2) Per-step survival, cumulative survival to end, demand
-        # ----------------------------------------------------------
-        df["scrap_rate"] = (
-            df.get("scrap_rate", 0.0)
+        # ------------------------------------------------------------------
+        # 3) Build DAG & simulate unit flow from all roots
+        # ------------------------------------------------------------------
+        graph = _build_graph(
+            df,
+            id_col="step_id",
+            succ_col="succ",
+            frac_col="succ_frac",
+        )
+        active_roots = graph["roots"]
+
+        (
+            flow_in_unit,
+            good_out_unit,
+            scrap_unit,
+            edge_good_unit,
+            final_good_unit,
+        ) = _simulate_unit_flow(
+            df,
+            graph,
+            root_ids=active_roots,          # support multiple start points
+            id_col="step_id",
+            scrap_col="scrap_rate",
+        )
+
+        if final_good_unit <= 0:
+            raise ValueError(
+                "Final good output from the DAG configuration is zero; "
+                "check scrap rates and DAG connections."
+            )
+
+        # Scale per-unit flows to annual volumes
+        root_input_per_year = final_cells_required / final_good_unit
+
+        # Pre-allocate output columns
+        df["input_units_per_year"] = 0.0
+        df["good_units_per_year"] = 0.0
+        df["scrap_units_per_year"] = 0.0
+        df["machines"] = 0
+        df["capacity_cells_per_year"] = 0.0
+        df["capacity_ratio_vs_demand"] = np.nan
+
+        id_to_idx = {sid: i for i, sid in enumerate(df["step_id"])}
+
+        bottleneck_ratio = math.inf
+        bottleneck_sid: str | None = None
+
+        # ------------------------------------------------------------------
+        # 4) Size machines per step based on lead_time_s and DAG demand
+        # ------------------------------------------------------------------
+        for sid in graph["topo"]:
+            idx = id_to_idx[sid]
+            fin_unit = float(flow_in_unit[sid])
+            good_unit_val = float(good_out_unit[sid])
+            scrap_unit_val = float(scrap_unit[sid])
+
+            fin_year = fin_unit * root_input_per_year
+            good_year = good_unit_val * root_input_per_year
+            scrap_year = scrap_unit_val * root_input_per_year
+
+            df.at[idx, "input_units_per_year"] = fin_year
+            df.at[idx, "good_units_per_year"] = good_year
+            df.at[idx, "scrap_units_per_year"] = scrap_year
+
+            lead_time_s = float(df.at[idx, "lead_time_s"] or 0.0)
+            lead_time_s = max(lead_time_s, 1e-6)  # avoid division by zero
+
+            if fin_year > 0 and avail_time_seconds > 0:
+                seconds_needed = fin_year * lead_time_s
+                machines = int(math.ceil(seconds_needed / avail_time_seconds))
+                machines = max(machines, 1)
+            else:
+                machines = 0
+
+            df.at[idx, "machines"] = machines
+
+            # Capacity purely from lead_time and available time; no throughput modes
+            if machines > 0:
+                cap_cells = machines * avail_time_seconds / lead_time_s
+            else:
+                cap_cells = 0.0
+            df.at[idx, "capacity_cells_per_year"] = cap_cells
+
+            if fin_year > 0:
+                ratio = cap_cells / fin_year
+                df.at[idx, "capacity_ratio_vs_demand"] = ratio
+                if ratio < bottleneck_ratio:
+                    bottleneck_ratio = ratio
+                    bottleneck_sid = sid
+
+        if bottleneck_sid is None:
+            # Fallback: treat first step as bottleneck with ratio 1
+            bottleneck_sid = graph["topo"][0]
+            bottleneck_ratio = 1.0
+
+        # Line capacity determined by bottleneck (using its capacity/demand ratio)
+        line_capacity_cells = final_cells_required * bottleneck_ratio
+        utilization = min(
+            final_cells_required / max(line_capacity_cells, 1.0),
+            1.0,
+        )
+
+        # Derived UI helper columns
+        df["demand_cells_step_per_year"] = df["input_units_per_year"]
+        df["required_cycle_time_s"] = np.where(
+            df["demand_cells_step_per_year"] > 0,
+            (df["machines"] * avail_time_seconds) / df["demand_cells_step_per_year"],
+            np.nan,
+        )
+
+        # ------------------------------------------------------------------
+        # 5) Materials: survival from intro_step via DAG re-simulation
+        # ------------------------------------------------------------------
+        mats = self.raw_materials.copy()
+
+        if "intro_step" not in mats.columns:
+            mats["intro_step"] = ""
+        mats["intro_step"] = mats["intro_step"].astype(str)
+
+        # Make sure all required columns exist and are numeric
+        if "pricing_unit" not in mats.columns:
+            mats["pricing_unit"] = "kg"
+        if "g_per_cell" not in mats.columns:
+            mats["g_per_cell"] = 0.0
+        if "area_per_cell_m2" not in mats.columns:
+            mats["area_per_cell_m2"] = 0.0
+        if "eur_per_kg" not in mats.columns:
+            mats["eur_per_kg"] = 0.0
+        if "eur_per_m2" not in mats.columns:
+            mats["eur_per_m2"] = 0.0
+
+        mats["pricing_unit"] = mats["pricing_unit"].astype(str).str.lower()
+        mats["kg_per_cell"] = mats["g_per_cell"].astype(float) / 1000.0
+        mats["m2_per_cell"] = mats["area_per_cell_m2"].astype(float)
+        mats["eur_per_kg"] = mats["eur_per_kg"].astype(float)
+        mats["eur_per_m2"] = mats["eur_per_m2"].astype(float)
+
+        # Map step name -> step_id (first occurrence)
+        name_to_sid: Dict[str, str] = {}
+        for _, row in df.iterrows():
+            name_to_sid.setdefault(row["step"], row["step_id"])
+
+        def _material_survival(intro_name: str) -> float:
+            """
+            Survival from intro step to final good cell:
+            simulate 1 unit entering the intro step on the DAG and see
+            how much final good comes out.
+            """
+            sid = name_to_sid.get(intro_name)
+            if not sid:
+                return 1.0
+            (
+                _flow_in,
+                _good_out,
+                _scrap_amt,
+                _edge_good,
+                final_good_from_intro,
+            ) = _simulate_unit_flow(
+                df,
+                graph,
+                root_ids=[sid],         # single-start survival simulation
+                id_col="step_id",
+                scrap_col="scrap_rate",
+            )
+            return max(final_good_from_intro, 1e-6)
+
+        mats["survival"] = (
+            mats["intro_step"]
+            .map(_material_survival)
             .astype(float)
-            .clip(lower=0.0, upper=0.999999)
-        )
-        df["survival"] = 1.0 - df["scrap_rate"]
-
-        # cumulative survival from this step to the end (inclusive)
-        survival_downstream: List[float] = []
-        prod = 1.0
-        for s in df["survival"][::-1]:
-            prod *= s
-            survival_downstream.append(prod)
-        survival_downstream = list(reversed(survival_downstream))
-        df["cumulative_survival_to_end"] = survival_downstream
-
-        # demand at each step (units/year at entry)
-        df["demand_cells_step_per_year"] = (
-            final_cells_required
-            / df["cumulative_survival_to_end"].replace(0, 1e-12)
-        )
-
-        # required cycle time at each step
-        df["required_cycle_time_s"] = (
-            line_cycle_time_s * df["cumulative_survival_to_end"]
-        )
-
-        # ----------------------------------------------------------
-        # 3) Lead time, machine sizing, capacity
-        # ----------------------------------------------------------
-        df["lead_time_s"] = (
-            pd.to_numeric(df.get("lead_time_s", 0.0), errors="coerce")
-            .fillna(0.0)
             .clip(lower=1e-6)
         )
-
-        # Number of Machines derived solely from lead_time & required cycle
-        df["machines"] = np.ceil(
-            df["lead_time_s"] / df["required_cycle_time_s"]
-        ).astype(int).clip(lower=1)
-
-        df["capacity_cells_per_year"] = (
-            df["machines"] * avail_time_seconds / df["lead_time_s"]
-        )
-        df["capacity_ratio_vs_demand"] = (
-            df["capacity_cells_per_year"]
-            / df["demand_cells_step_per_year"].replace(0, 1e-12)
-        )
-
-        bottleneck_idx = df["capacity_ratio_vs_demand"].idxmin()
-        bottleneck_row = df.loc[bottleneck_idx]
-
-        line_capacity_cells = (
-            float(df.loc[bottleneck_idx, "capacity_cells_per_year"])
-            * float(df.loc[bottleneck_idx, "cumulative_survival_to_end"])
-        )
-
-        actual_cells_for_cost = final_cells_required
-        utilization = min(
-        actual_cells_for_cost / max(line_capacity_cells, 1.0), 1.0
-        )
-
-        # ----------------------------------------------------------
-        # 4) Materials procurement
-        # ----------------------------------------------------------
-        mats = self.raw_materials.copy()
-        mats["pricing_unit"] = mats.get("pricing_unit", "kg").astype(str).str.lower()
-        mats["kg_per_cell"] = mats["g_per_cell"].astype(float) / 1000.0
-        mats["m2_per_cell"] = mats.get("area_per_cell_m2", 0.0).astype(float)
-        mats["eur_per_kg"] = mats.get("eur_per_kg", 0.0).astype(float)
-        mats["eur_per_m2"] = mats.get("eur_per_m2", 0.0).astype(float)
-        mats["survival"] = mats["total_yield"].clip(lower=1e-6)
 
         is_m2 = mats["pricing_unit"].eq("m2")
         mats["net_cost_per_cell_eur"] = np.where(
@@ -665,7 +1189,7 @@ class BatteryCostModel:
             mats["procurement_cost_per_cell_eur"].sum()
         )
 
-        # Attribute intro-step materials cost to the right step (if names match)
+        # Attribute intro-step materials cost to intro step for per-step reporting
         df["materials_cost_per_cell_total_eur"] = 0.0
         for _, r in mats.iterrows():
             idx = df.index[df["step"] == r["intro_step"]]
@@ -674,13 +1198,14 @@ class BatteryCostModel:
                     idx[0], "materials_cost_per_cell_total_eur"
                 ] += float(r["procurement_cost_per_cell_eur"])
 
-        # ----------------------------------------------------------
-        # 5) Labor per cell
-        # ----------------------------------------------------------
+        # ------------------------------------------------------------------
+        # 6) Labor per cell (based on line takt, not per-step takt)
+        # ------------------------------------------------------------------
+        line_cycle_time_s = avail_time_seconds / max(final_cells_required, 1.0)
+
         df["spec_hours_per_cell"] = (
             df["spec_workers_per_machine"] * df["machines"]
         ) * (line_cycle_time_s / 3600.0)
-
         df["supp_hours_per_cell"] = (
             df["supp_workers_per_machine"] * df["machines"]
         ) * (line_cycle_time_s / 3600.0)
@@ -693,16 +1218,14 @@ class BatteryCostModel:
         )
         labor_per_cell = spec_labor_per_cell + supp_labor_per_cell
 
-   
-        # ----------------------------------------------------------
-        # 6) CAPEX & Area (incl. logistics/indirect investment)
-        # ----------------------------------------------------------
+        # ------------------------------------------------------------------
+        # 7) CAPEX & Area (incl. logistics/indirect investment)
+        # ------------------------------------------------------------------
         df["step_capex_total_eur"] = (
             df["capex_meur_per_machine"] * 1_000_000.0 * df["machines"]
         )
         total_capital_equipment_base = float(df["step_capex_total_eur"].sum())
 
-        # Additional CAPEX for logistics & indirect investment
         logistics_capex = total_capital_equipment_base * max(
             e.logistics_investment_factor, 0.0
         )
@@ -747,10 +1270,12 @@ class BatteryCostModel:
         base_cost = max(g.building_cost_eur_per_m2, 0.0)
         cost_indoor_none = indoor_none * base_cost
         cost_indoor_clean = (
-            indoor_clean * base_cost + indoor_clean * max(g.clean_add_cost_eur_per_m2, 0.0)
+            indoor_clean * base_cost
+            + indoor_clean * max(g.clean_add_cost_eur_per_m2, 0.0)
         )
         cost_indoor_dry = (
-            indoor_dry * base_cost + indoor_dry * max(g.dry_add_cost_eur_per_m2, 0.0)
+            indoor_dry * base_cost
+            + indoor_dry * max(g.dry_add_cost_eur_per_m2, 0.0)
         )
         cost_outdoor = required_outdoor_area * base_cost
 
@@ -764,14 +1289,15 @@ class BatteryCostModel:
         annual_depr_building = building_value / e.depreciation_years_building
         annual_depreciation = annual_depr_equipment + annual_depr_building
 
+        actual_cells_for_cost = final_cells_required
         depreciation_per_cell = annual_depreciation / max(actual_cells_for_cost, 1.0)
 
-        # ----------------------------------------------------------
-        # 7) Energy per cell (process + building baseline)
-        # ----------------------------------------------------------
+        # ------------------------------------------------------------------
+        # 8) Energy per cell (process + building baseline)
+        # ------------------------------------------------------------------
         df["kwh_per_cell_process"] = df["kw_per_unit"] * (df["lead_time_s"] / 3600.0)
         df["energy_cost_per_cell_process_eur"] = (
-                df["kwh_per_cell_process"] * g.electricity_price_eur_per_kwh
+            df["kwh_per_cell_process"] * g.electricity_price_eur_per_kwh
         )
         process_energy_per_cell = float(
             df["energy_cost_per_cell_process_eur"].sum()
@@ -779,17 +1305,18 @@ class BatteryCostModel:
 
         annual_building_kwh = g.baseline_building_kwh * required_indoor_area
         building_energy_kwh_per_cell = (
-                annual_building_kwh / max(actual_cells_for_cost, 1.0)
+            annual_building_kwh / max(actual_cells_for_cost, 1.0)
         )
         building_energy_cost_per_cell = (
-                building_energy_kwh_per_cell * g.electricity_price_eur_per_kwh
+            building_energy_kwh_per_cell * g.electricity_price_eur_per_kwh
         )
 
         energy_per_cell = process_energy_per_cell + building_energy_cost_per_cell
+        df["energy_cost_per_cell_eur"] = df["energy_cost_per_cell_process_eur"]
 
-        # ----------------------------------------------------------
-        # 8) Overheads & unit cost (new factor model)
-        # ----------------------------------------------------------
+        # ------------------------------------------------------------------
+        # 9) Overheads & unit cost
+        # ------------------------------------------------------------------
         indirect_personnel_oh_per_cell = (
             labor_per_cell * max(e.indirect_personnel_factor, 0.0)
         )
@@ -824,9 +1351,9 @@ class BatteryCostModel:
 
         cost_build_per_kwh = unit_cost_build / cell_kwh
 
-        # ----------------------------------------------------------
-        # 9) Sensitivity (±25%) – now on explicit components
-        # ----------------------------------------------------------
+        # ------------------------------------------------------------------
+        # 10) Sensitivity (±25%) on major components
+        # ------------------------------------------------------------------
         sens_items: List[Dict[str, Any]] = []
 
         def add_s(name: str, value: float) -> None:
@@ -855,30 +1382,24 @@ class BatteryCostModel:
         price_per_cell = unit_cost_build * (1.0 + max(e.desired_margin, 0.0))
         price_per_kwh = price_per_cell / cell_kwh
 
-        # ----------------------------------------------------------
-        # 10) Project timeline & cashflows
-        # ----------------------------------------------------------
+        # ------------------------------------------------------------------
+        # 11) Project timeline & cashflows
+        # ------------------------------------------------------------------
         years = list(range(0, e.project_years + 1))
         capex_total = total_capital_equipment + building_value
 
         capex_outflow_per_year = [0.0] * (e.project_years + 1)
         for y in range(min(e.construction_years, e.project_years)):
-            capex_outflow_per_year[y] = capex_total / max(
-                e.construction_years, 1
-            )
+            capex_outflow_per_year[y] = capex_total / max(e.construction_years, 1)
 
         prod_cells_per_year = [0.0] * (e.project_years + 1)
         start_prod_year = e.construction_years
         for y in range(start_prod_year, e.project_years + 1):
             t = y - start_prod_year
-            ramp_frac = (
-                1.0
-                if e.ramp_years <= 0
-                else min(t / e.ramp_years, 1.0)
-            )
+            ramp_frac = 1.0 if e.ramp_years <= 0 else min(t / e.ramp_years, 1.0)
             prod_cells_per_year[y] = final_cells_required * ramp_frac
 
-        # Opex excludes depreciation; overheads are already included
+        # Opex excludes depreciation; overheads are already included above
         opex_per_cell = unit_cost_build - depreciation_per_cell
 
         cashflows: List[Dict[str, Any]] = []
@@ -893,10 +1414,11 @@ class BatteryCostModel:
                 if y >= start_prod_year
                 else 0.0
             )
+            capex_y = capex_outflow_per_year[y]
             ebit = revenue - opex - deprec
             tax = max(ebit, 0.0) * e.tax_rate
             nopat = ebit - tax
-            fcf = nopat + deprec - capex_outflow_per_year[y]
+            fcf = nopat + deprec - capex_y
             disc = (1.0 + e.capital_cost_wacc) ** y
             npv_y = fcf / disc
 
@@ -907,6 +1429,7 @@ class BatteryCostModel:
                     "opex": opex,
                     "depr": deprec,
                     "tax": tax,
+                    "capex": capex_y,
                     "fcf": fcf,
                     "npv": npv_y,
                 }
@@ -920,6 +1443,9 @@ class BatteryCostModel:
             None,
         )
 
+        # ------------------------------------------------------------------
+        # 12) KPIs & output bundle
+        # ------------------------------------------------------------------
         kpis = {
             "materials_procurement_per_cell_eur": materials_procurement_per_cell,
             "process_energy_per_cell_eur": process_energy_per_cell,
@@ -946,7 +1472,7 @@ class BatteryCostModel:
             "line_cycle_time_s": line_cycle_time_s,
             "line_capacity_cells": line_capacity_cells,
             "actual_cells": actual_cells_for_cost,
-            "bottleneck_step": bottleneck_row["step"],
+            "bottleneck_step": df.loc[df["step_id"] == bottleneck_sid, "step"].iloc[0],
             "utilization": utilization,
             "capital_equipment_base_eur": total_capital_equipment_base,
             "logistics_capex_eur": logistics_capex,
@@ -968,263 +1494,254 @@ class BatteryCostModel:
             "breakeven_year": breakeven_year,
         }
 
+        cash_df = pd.DataFrame(cashflows)
+
+        dag_totals = {
+            "graph": graph,
+            "flow_in_unit": flow_in_unit,
+            "good_out_unit": good_out_unit,
+            "scrap_unit": scrap_unit,
+            "edge_good_unit": edge_good_unit,
+            "root_input_per_year": root_input_per_year,
+            "final_good_unit": final_good_unit,
+        }
+
         return {
             "kpis": kpis,
             "steps": df,
             "materials": mats,
-            "cash": pd.DataFrame(cashflows),
+            "cash": cash_df,
             "sens": sens_df,
+            "dag": dag_totals,
         }
 
-    # ------------------------------------------------------------------
-    # Figures
-    # ------------------------------------------------------------------
+    # ========================================================
+    # Visualization helpers (figures + Sankey + table view)
+    # ========================================================
     @staticmethod
     def figs(
-        df: pd.DataFrame,
+        df_steps: pd.DataFrame,
         mats: pd.DataFrame,
-        k: Dict[str, Any],
-        cash: pd.DataFrame,
+        kpis: Dict[str, Any],
+        cash_df: pd.DataFrame,
         sens_df: pd.DataFrame,
-    ):
-        cells = max(k["actual_cells"], 1.0)
+    ) -> Tuple[go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure]:
+        """
+        Build the standard dashboard figures from model outputs.
+        Kept intentionally lightweight; everything derived from kpis + DataFrames.
+        """
+        final_cells = float(kpis["final_cells_required"])
 
-        parts = {
-            "Materials": k["materials_procurement_per_cell_eur"] * cells,
-            "Energy (incl. building)": k["energy_per_cell_eur"] * cells,
-            "Specialist Labor": k["spec_labor_per_cell_eur"] * cells,
-            "Support Labor": k["supp_labor_per_cell_eur"] * cells,
-            "Indirect Personnel OH": k["indirect_personnel_oh_per_cell_eur"] * cells,
-            "Logistics Personnel OH": k["logistics_personnel_oh_per_cell_eur"] * cells,
-            "Building Maintenance": k["building_maintenance_oh_per_cell_eur"] * cells,
-            "Machine Maintenance": k["machine_maintenance_oh_per_cell_eur"] * cells,
-            "Depreciation": k["depreciation_per_cell_eur"] * cells,
+        # --- Annual steady-state cost (M€/yr) --------------------------------
+        annual_costs = {
+            "Materials": kpis["materials_procurement_per_cell_eur"] * final_cells,
+            "Energy": kpis["energy_per_cell_eur"] * final_cells,
+            "Direct labor": kpis["direct_labor_per_cell_eur"] * final_cells,
+            "Indirect personnel OH": kpis["indirect_personnel_oh_per_cell_eur"] * final_cells,
+            "Logistics personnel OH": kpis["logistics_personnel_oh_per_cell_eur"] * final_cells,
+            "Building maintenance": kpis["building_maintenance_oh_per_cell_eur"] * final_cells,
+            "Machine maintenance": kpis["machine_maintenance_oh_per_cell_eur"] * final_cells,
+            "Depreciation": kpis["depreciation_per_cell_eur"] * final_cells,
         }
-
         fig_annual = px.bar(
-            x=list(parts.keys()),
-            y=list(parts.values()),
-            labels={"x": "Component", "y": "€/year"},
+            x=list(annual_costs.keys()),
+            y=[v / 1e6 for v in annual_costs.values()],
+            labels={"x": "Component", "y": "Annual cost (M€)"},
         )
-        fig_annual.update_layout(yaxis_tickprefix="€ ")
+        fig_annual.update_layout(margin=dict(l=40, r=10, t=30, b=40))
 
-        parts_cell = {
-            "Materials": k["materials_procurement_per_cell_eur"],
-            "Energy (incl. building)": k["energy_per_cell_eur"],
-            "Specialist Labor": k["spec_labor_per_cell_eur"],
-            "Support Labor": k["supp_labor_per_cell_eur"],
-            "Indirect Personnel OH": k["indirect_personnel_oh_per_cell_eur"],
-            "Logistics Personnel OH": k["logistics_personnel_oh_per_cell_eur"],
-            "Building Maintenance": k["building_maintenance_oh_per_cell_eur"],
-            "Machine Maintenance": k["machine_maintenance_oh_per_cell_eur"],
-            "Depreciation": k["depreciation_per_cell_eur"],
+        # --- Single-cell cost breakdown (€/cell) ------------------------------
+        cell_costs = {
+            "Materials": kpis["materials_procurement_per_cell_eur"],
+            "Energy": kpis["energy_per_cell_eur"],
+            "Direct labor": kpis["direct_labor_per_cell_eur"],
+            "Indirect personnel OH": kpis["indirect_personnel_oh_per_cell_eur"],
+            "Logistics personnel OH": kpis["logistics_personnel_oh_per_cell_eur"],
+            "Building maintenance": kpis["building_maintenance_oh_per_cell_eur"],
+            "Machine maintenance": kpis["machine_maintenance_oh_per_cell_eur"],
+            "Depreciation": kpis["depreciation_per_cell_eur"],
         }
-
         fig_cell = px.bar(
-            x=list(parts_cell.keys()),
-            y=list(parts_cell.values()),
-            labels={"x": "Component", "y": "€/cell"},
+            x=list(cell_costs.keys()),
+            y=list(cell_costs.values()),
+            labels={"x": "Component", "y": "Cost (€/cell)"},
         )
-        fig_cell.add_hline(
-            y=k["unit_cost_build_eur_per_cell"],
-            line_dash="dash",
-            annotation_text="Build cost",
-            annotation_position="top left",
-        )
+        fig_cell.update_layout(margin=dict(l=40, r=10, t=30, b=40))
 
+        # --- Step capacity vs. final target ----------------------------------
+        df_cap = df_steps[["step", "capacity_cells_per_year"]].copy()
+        df_cap["step"] = df_cap["step"].astype(str)
         fig_cap = px.bar(
-            df,
+            df_cap,
             x="step",
             y="capacity_cells_per_year",
-            labels={
-                "step": "Process Step",
-                "capacity_cells_per_year": "Cells/Year",
-            },
+            labels={"step": "Process step", "capacity_cells_per_year": "Capacity (cells/yr)"},
         )
-        fig_cap.add_hline(
-            y=k["final_cells_required"],
-            line_dash="dash",
-            annotation_text="Final Cells Target",
-            annotation_position="top left",
-        )
-
-        fig_mat = px.bar(
-            mats,
-            x="name",
-            y="procurement_cost_per_cell_eur",
-            labels={
-                "name": "Material",
-                "procurement_cost_per_cell_eur": "€/cell (procurement)",
-            },
-        )
-
-        base = k["unit_cost_build_eur_per_cell"]
-        td = sens_df.copy()
-        td["LowDelta"] = td["Low"] - base
-        td["HighDelta"] = td["High"] - base
-        td = td.sort_values("Impact", ascending=False)
-
-        fig_sens = go.Figure()
-        fig_sens.add_trace(
-            go.Bar(
-                y=td["Parameter"],
-                x=td["LowDelta"],
-                name="-25%",
-                orientation="h",
-            )
-        )
-        fig_sens.add_trace(
-            go.Bar(
-                y=td["Parameter"],
-                x=td["HighDelta"],
-                name="+25%",
-                orientation="h",
-            )
-        )
-        fig_sens.update_layout(
-            barmode="overlay",
-            xaxis_title="Δ €/cell vs base",
-            legend_orientation="h",
-        )
-
-        cash = cash.copy()
-        fig_time = go.Figure()
-        fig_time.add_trace(
-            go.Bar(
-                x=cash["year"],
-                y=-(cash["depr"] + cash["opex"]),
-                name="Costs (excl. CAPEX)",
-                offsetgroup=0,
-            )
-        )
-        fig_time.add_trace(
-            go.Bar(
-                x=cash["year"],
-                y=-cash["fcf"].where(cash["fcf"] < 0, 0.0),
-                name="CAPEX/FCF<0",
-                offsetgroup=1,
-            )
-        )
-        fig_time.add_trace(
+        fig_cap.add_trace(
             go.Scatter(
-                x=cash["year"],
-                y=cash["revenue"],
-                name="Revenue",
-                mode="lines+markers",
-                yaxis="y",
+                x=df_cap["step"],
+                y=[final_cells] * len(df_cap),
+                mode="lines",
+                name="Target final cells",
             )
         )
+        fig_cap.update_layout(margin=dict(l=40, r=10, t=30, b=80))
 
-        be_year = k.get("breakeven_year")
-        if isinstance(be_year, (int, float)):
-            fig_time.add_vline(
-                x=int(be_year),
-                line_dash="dash",
-                annotation_text=f"Breakeven Y{int(be_year)}",
+        # --- Materials procurement breakdown (€/cell) ------------------------
+        if "procurement_cost_per_cell_eur" in mats.columns:
+            fig_mat = px.bar(
+                mats,
+                x="name",
+                y="procurement_cost_per_cell_eur",
+                labels={"name": "Material", "procurement_cost_per_cell_eur": "Cost (€/cell)"},
             )
-        fig_time.update_layout(yaxis_title="€ / year")
+        else:
+            fig_mat = go.Figure()
+        fig_mat.update_layout(margin=dict(l=40, r=10, t=30, b=80))
+
+        # --- Tornado sensitivity (impact in €/cell) ---------------------------
+        if not sens_df.empty:
+            fig_sens = px.bar(
+                sens_df,
+                x="Impact",
+                y="Parameter",
+                orientation="h",
+                labels={"Impact": "Δ cost (€/cell) at ±25%", "Parameter": ""},
+            )
+            fig_sens.update_layout(margin=dict(l=80, r=10, t=30, b=40))
+        else:
+            fig_sens = go.Figure()
+
+        # --- Project timeline: costs (bars) & revenue (line) -----------------
+        fig_time = go.Figure()
+        if not cash_df.empty:
+            years = cash_df["year"]
+            fig_time.add_bar(
+                x=years,
+                y=-(cash_df["opex"] / 1e6),
+                name="Opex (M€)",
+            )
+            if "capex" in cash_df.columns:
+                fig_time.add_bar(
+                    x=years,
+                    y=-(cash_df["capex"] / 1e6),
+                    name="Capex (M€)",
+                )
+            fig_time.add_scatter(
+                x=years,
+                y=(cash_df["revenue"] / 1e6),
+                mode="lines+markers",
+                name="Revenue (M€)",
+            )
+            fig_time.update_layout(
+                barmode="relative",
+                xaxis_title="Year",
+                yaxis_title="M€",
+                margin=dict(l=50, r=10, t=30, b=40),
+            )
 
         return fig_annual, fig_cell, fig_cap, fig_mat, fig_sens, fig_time
 
-    # ============================================================
-    # Sankey: flow vs scrap
-    # ============================================================
     @staticmethod
     def sankey(
-        df: pd.DataFrame,
-        k: Dict[str, Any],  # kept for future extensions if needed
+        df_steps: pd.DataFrame,
+        dag_totals: Dict[str, Any],
         scale: float = 1e6,
     ) -> go.Figure:
         """
-        Sankey diagram where each step splits into:
-        - good flow to the next step (or Final Good for the last step)
-        - scrap flow to a dedicated Scrap node for this step
+        Build a Sankey diagram of good flow and scrap based on the DAG totals.
 
-        Values are scaled by 'scale' (default 1e6 -> millions of cells/year).
+        scale: unit scaling (default 1e6 => values in million cells/year)
+
+        The diagram aggregates all sink steps into a *single* "Final good output" node,
+        so the visual end point is unique even if the process has multiple sinks.
         """
-        df = df.copy().reset_index(drop=True)
+        graph = dag_totals["graph"]
+        good_out_unit = dag_totals["good_out_unit"]
+        scrap_unit = dag_totals["scrap_unit"]
+        edge_good_unit = dag_totals["edge_good_unit"]
+        root_input_per_year = dag_totals["root_input_per_year"]
 
-        steps = df["step"].tolist()
-        n = len(steps)
-        step_nodes = steps
-        final_node_label = "Final Good Cells"
-        scrap_nodes = [f"Scrap @ {s}" for s in steps]
+        ids = graph["ids"]
 
-        labels = step_nodes + [final_node_label] + scrap_nodes
-        idx_final = n
-        idx_scrap_start = n + 1
+        labels: List[str] = []
+        node_index: Dict[Tuple[str, str], int] = {}
+
+        # Step nodes
+        for sid in ids:
+            row = df_steps.loc[df_steps["step_id"].astype(str) == sid].iloc[0]
+            label = str(row.get("step", sid))
+            node_index[("step", sid)] = len(labels)
+            labels.append(label)
+
+        # Scrap nodes
+        for sid in ids:
+            node_index[("scrap", sid)] = len(labels)
+            labels.append(f"Scrap @ {sid}")
+
+        # Final-good node (single endpoint)
+        final_node_idx = len(labels)
+        labels.append("Final good output")
 
         sources: List[int] = []
         targets: List[int] = []
         values: List[float] = []
-        link_labels: List[str] = []
-        link_colors: List[str] = []
 
-        good_color = "rgba(37,99,235,0.5)"
-        scrap_color = "rgba(220,38,38,0.6)"
+        # Good flow along edges
+        for (src, dst), val_unit in edge_good_unit.items():
+            val = val_unit * root_input_per_year / max(scale, 1.0)
+            if val <= 0:
+                continue
+            s_idx = node_index[("step", src)]
+            t_idx = node_index[("step", dst)]
+            sources.append(s_idx)
+            targets.append(t_idx)
+            values.append(val)
 
-        for i in range(n):
-            step_input = float(df.loc[i, "demand_cells_step_per_year"])
-            survival = float(df.loc[i, "survival"])
-            scrap_rate = float(df.loc[i, "scrap_rate"])  # kept for clarity
-            good_out = step_input * survival
-            scrap_out = step_input - good_out
+        # Scrap edges
+        for sid in ids:
+            val_unit = scrap_unit[sid]
+            val = val_unit * root_input_per_year / max(scale, 1.0)
+            if val <= 0:
+                continue
+            s_idx = node_index[("step", sid)]
+            t_idx = node_index[("scrap", sid)]
+            sources.append(s_idx)
+            targets.append(t_idx)
+            values.append(val)
 
-            good_val = max(good_out / scale, 0.0)
-            scrap_val = max(scrap_out / scale, 0.0)
-
-            # good flow: step i -> next step or final
-            if i < n - 1:
-                sources.append(i)
-                targets.append(i + 1)
-            else:
-                sources.append(i)
-                targets.append(idx_final)
-            values.append(good_val)
-            link_labels.append(f"Good from {steps[i]}: {good_out:,.0f}/yr")
-            link_colors.append(good_color)
-
-            # scrap flow: step i -> its scrap node
-            sources.append(i)
-            targets.append(idx_scrap_start + i)
-            values.append(scrap_val)
-            link_labels.append(f"Scrap at {steps[i]}: {scrap_out:,.0f}/yr")
-            link_colors.append(scrap_color)
-
-        node_colors = (
-            ["#93c5fd"] * n  # steps
-            + ["#22c55e"]    # final good
-            + ["#fca5a5"] * n  # scrap nodes
-        )
+        # Final-good edges from sink steps
+        for sid in graph["sinks"]:
+            good_val_unit = good_out_unit[sid]
+            val = good_val_unit * root_input_per_year / max(scale, 1.0)
+            if val <= 0:
+                continue
+            s_idx = node_index[("step", sid)]
+            t_idx = final_node_idx
+            sources.append(s_idx)
+            targets.append(t_idx)
+            values.append(val)
 
         fig = go.Figure(
             data=[
                 go.Sankey(
-                    arrangement="snap",
-                    textfont=dict(size=12),
                     node=dict(
+                        pad=15,
+                        thickness=20,
+                        line=dict(width=0.5),
                         label=labels,
-                        color=node_colors,
-                        pad=16,
-                        thickness=22,
                     ),
                     link=dict(
                         source=sources,
                         target=targets,
                         value=values,
-                        label=link_labels,
-                        color=link_colors,
                     ),
                 )
             ]
         )
         fig.update_layout(
-            title=(
-                "Flow & Scrap per Step — values in millions of cells/year "
-                f"(÷ {int(scale):,})"
-            ),
-            margin=dict(l=10, r=10, t=50, b=10),
-            height=540,
+            title_text="Process flow and scrap (million cells / year)",
+            font_size=10,
         )
         return fig
 
@@ -1232,16 +1749,19 @@ class BatteryCostModel:
     def table_view(df: pd.DataFrame):
         """
         Build read-only step summary table for the right-hand panel.
-        Only lead time, scrap & derived fields are shown.
+        Only lead time, scrap & derived fields are shown, plus successor.
         """
         df = df.copy()
         if "order" not in df.columns:
             df["order"] = range(1, len(df) + 1)
+        if "successor_step" not in df.columns:
+            df["successor_step"] = ""
         df = df.sort_values("order")
 
         show_cols = [
             "order",
             "step",
+            "successor_step",
             "env",
             "lead_time_s",
             "scrap_rate",
@@ -1290,6 +1810,7 @@ class BatteryCostModel:
         columns = [
             {"name": "Order", "id": "order", "type": "numeric"},
             {"name": "Process Step", "id": "step", "presentation": "input"},
+            {"name": "Successor Step", "id": "successor_step"},
             {"name": "Environment", "id": "env", "presentation": "dropdown"},
             {
                 "name": "Lead Time (s/unit)",
@@ -1430,12 +1951,6 @@ def build_materials_columns(steps_rows):
             "type": "numeric",
             "format": {"specifier": ".3f"},
         },
-        {
-            "name": "Total Yield (0–1)",
-            "id": "total_yield",
-            "type": "numeric",
-            "format": {"specifier": ".4f"},
-        },
     ]
     dropdown = {
         "intro_step": {"options": options},
@@ -1449,8 +1964,14 @@ def build_materials_columns(steps_rows):
     return columns, dropdown
 
 
-# Precomputed columns & dropdown for initial layout
 _mat_columns_init, _mat_dropdown_init = build_materials_columns(DEFAULT_STEPS)
+
+ENV_DROPDOWN_OPTIONS = [
+    {"label": "None", "value": "none"},
+    {"label": "Clean", "value": "clean"},
+    {"label": "Dry", "value": "dry"},
+]
+
 
 # ============================================================
 # Layout
@@ -1952,9 +2473,13 @@ left_inputs = html.Div(
             editable=True,
             dropdown=_mat_dropdown_init,
             row_deletable=True,
-            style_table={"overflowX": "auto"},
+            style_table={
+                "overflowX": "auto",
+                "maxHeight": "400px",
+                "overflowY": "auto",
+            },
             style_cell={"padding": "6px", "minWidth": 120, "whiteSpace": "normal"},
-            page_size=12,
+            page_action="none",
         ),
         html.Button(
             "Add material",
@@ -1963,7 +2488,7 @@ left_inputs = html.Div(
             style={"marginTop": "8px"},
         ),
         html.Hr(),
-        html.H3("Process Steps (lead time & scrap; add/remove & reorder)"),
+        html.H3("Process Steps (lead time, scrap & successors; add/remove & reorder)"),
         html.Div(
             [
                 html.Button(
@@ -1981,6 +2506,11 @@ left_inputs = html.Div(
             columns=[
                 {"name": "Order", "id": "order", "type": "numeric"},
                 {"name": "Process Step", "id": "step", "presentation": "input"},
+                {
+                    "name": "Successor Step",
+                    "id": "successor_step",
+                    "presentation": "dropdown",
+                },
                 {
                     "name": "Environment (None/Clean/Dry)",
                     "id": "env",
@@ -2026,18 +2556,22 @@ left_inputs = html.Div(
             editable=True,
             dropdown={
                 "env": {
-                    "options": [
-                        {"label": "None", "value": "none"},
-                        {"label": "Clean", "value": "clean"},
-                        {"label": "Dry", "value": "dry"},
-                    ]
+                    "options": ENV_DROPDOWN_OPTIONS,
+                },
+                "successor_step": {
+                    "options": [{"label": "End (no successor)", "value": ""}]
+                    + [{"label": s["step"], "value": s["step"]} for s in DEFAULT_STEPS],
                 },
             },
             row_deletable=True,
             row_selectable="single",
-            style_table={"overflowX": "auto"},
+            style_table={
+                "overflowX": "auto",
+                "maxHeight": "400px",
+                "overflowY": "auto",
+            },
             style_cell={"padding": "6px", "minWidth": 120, "whiteSpace": "normal"},
-            page_size=12,
+            page_action="none",
         ),
         html.Div(
             [html.Button("Add step", id="add_step", n_clicks=0)],
@@ -2073,7 +2607,7 @@ left_inputs = html.Div(
 
 right_outputs = html.Div(
     [
-        html.H2("Analysis (Cell only)"),
+        html.H2("Analysis"),
         html.Div(
             id="kpi_row",
             style={"display": "flex", "gap": "12px", "flexWrap": "wrap"},
@@ -2185,13 +2719,17 @@ right_outputs = html.Div(
         dash_table.DataTable(
             id="steps_table_main",
             page_size=15,
-            style_table={"overflowX": "auto"},
+            style_table={"overflowX": "auto",
+                         "maxHeight": "400px",
+                         "overflowY": "auto",
+                         },
             style_cell={
                 "padding": "6px",
                 "minWidth": 90,
                 "maxWidth": 280,
                 "whiteSpace": "normal",
             },
+            page_action="none",
         ),
         html.Details(
             [
@@ -2199,35 +2737,43 @@ right_outputs = html.Div(
                 html.Ul(
                     [
                         html.Li(
+                            "Process topology is defined via 'Step ID' and internal "
+                            "'Successors'/'Successor Fractions' fields. A DAG is built "
+                            "and simulated to determine per-step demand, scrap, and flow."
+                        ),
+                        html.Li(
                             "Line cycle (takt) = available_time_seconds / final_good_cells. "
                             "Available time = days × shifts × hours × 3600 × OEE."
                         ),
                         html.Li(
-                            "At step i: cumulative survival to end = Π (1 - scrap_j) "
-                            "for j=i..end; demand at step = final_cells / cumulative_survival."
+                            "Machines per step are sized purely from lead time: "
+                            "seconds_needed = demand × lead_time_s; "
+                            "machines = ceil(seconds_needed / available_time_seconds)."
                         ),
                         html.Li(
-                            "Required step cycle = line_takt × cumulative_survival_to_end "
-                            "(faster than takt when there is scrap downstream)."
-                        ),
-                        html.Li(
-                            "Machines = ceil(lead_time / required_step_cycle). "
-                            "Capacity at step = machines × available_time / lead_time."
+                            "Capacity at step = machines × available_time_seconds / lead_time_s; "
+                            "the bottleneck step defines the overall line capacity."
                         ),
                         html.Li(
                             "Energy per cell at a step = kW_per_machine × (lead_time_s / 3600). "
                             "Baseline building load is added as extra kWh/cell."
                         ),
                         html.Li(
-                            "Area and equipment CAPEX scale with the calculated machine counts."
+                            "Area and equipment CAPEX scale with the calculated machine counts "
+                            "and environment (none/clean/dry)."
                         ),
                         html.Li(
                             "Overheads are applied via explicit factors for personnel and "
                             "maintenance instead of generic OH/G&A/R&D buckets."
                         ),
                         html.Li(
-                            "Sankey: each step splits into good flow to the next step "
-                            "(or Final Good) and scrap lost at that step."
+                            "Sankey: each step splits into good flow to successors "
+                            "(or Final Good) and scrap lost at that step. All sinks "
+                            "are aggregated into a single final-good node."
+                        ),
+                        html.Li(
+                            "Raw material input per final cell is scaled using process scrap "
+                            "from the intro step to the end (no separate yield input)."
                         ),
                     ]
                 ),
@@ -2284,10 +2830,10 @@ app.layout = html.Div(
     },
 )
 
+
 # ============================================================
 # Callbacks
 # ============================================================
-
 
 @app.callback(
     Output("materials_table", "data"),
@@ -2309,7 +2855,6 @@ def add_material(n, rows, steps_rows):
             "eur_per_kg": 0.0,
             "area_per_cell_m2": 0.0,
             "eur_per_m2": 0.0,
-            "total_yield": 1.0,
         }
     )
     return rows
@@ -2332,6 +2877,7 @@ def add_step(n, rows):
         {
             "order": next_order,
             "step": "New Step",
+            "successor_step": "",  # default to End (no successor)
             "env": "none",
             "lead_time_s": 10.0,
             "scrap_rate": 0.005,
@@ -2356,7 +2902,7 @@ def add_step(n, rows):
     prevent_initial_call=True,
 )
 def move_step(up_clicks, down_clicks, rows, sel_rows):
-    """Move selected step up or down in order."""
+    """Move selected step up or down in order (visual order; logic uses DAG)."""
     if not rows or not sel_rows:
         return rows
 
@@ -2381,6 +2927,27 @@ def move_step(up_clicks, down_clicks, rows, sel_rows):
     for i, r in enumerate(rows, start=1):
         r["order"] = i
     return rows
+
+
+@app.callback(
+    Output("steps_table", "dropdown"),
+    Input("steps_table", "data"),
+)
+def update_steps_dropdown(steps_rows):
+    """
+    Keep the 'Successor Step' dropdown in sync with the current step list.
+
+    DAG connectivity is still driven by the internal succ/succ_frac fields,
+    which are derived from this UI-facing column.
+    """
+    step_labels = [r.get("step") for r in (steps_rows or []) if r.get("step")]
+    successor_options = [{"label": "End (no successor)", "value": ""}] + [
+        {"label": s, "value": s} for s in step_labels
+    ]
+    return {
+        "env": {"options": ENV_DROPDOWN_OPTIONS},
+        "successor_step": {"options": successor_options},
+    }
 
 
 @app.callback(
@@ -2437,6 +3004,7 @@ def apply_preset(n, preset_key):
     steps = copy.deepcopy(p["steps"])
     for i, r in enumerate(steps, start=1):
         r["order"] = i
+        r.setdefault("successor_step", r.get("successor_step", ""))
     steps = sorted(steps, key=lambda r: r["order"])
 
     mats = copy.deepcopy(p["materials"])
@@ -2605,7 +3173,6 @@ def run_calc(
     steps_rows,
 ):
     """Run the cost model with current UI state and update all outputs."""
-    # Resolve cell Ah/Wh/V consistently
     resolved_ah, resolved_wh, resolved_v = _resolve_cell_params(
         cell_ah, cell_wh, cell_v
     )
@@ -2615,7 +3182,7 @@ def run_calc(
             el_price or DEFAULT_GENERAL["electricity_price_eur_per_kwh"]
         ),
         baseline_building_kwh=float(
-            building_baseline_kwh or DEFAULT_GENERAL["baseline_building_kw"]
+            building_baseline_kwh or DEFAULT_GENERAL["baseline_building_kwh"]
         ),
         specialist_labor_eur_per_h=float(
             labor_spec or DEFAULT_GENERAL["specialist_labor_eur_per_h"]
@@ -2690,9 +3257,10 @@ def run_calc(
     steps = pd.DataFrame(steps_rows or DEFAULT_STEPS).copy()
     if "order" not in steps.columns:
         steps["order"] = range(1, len(steps) + 1)
-    steps = steps.sort_values("order")
 
     mats = pd.DataFrame(materials_rows or DEFAULT_RAW_MATERIALS).copy()
+    if "intro_step" not in mats.columns:
+        mats["intro_step"] = ""
     step_names = set(steps["step"].tolist())
     if len(steps):
         fallback_step = steps["step"].iloc[0]
@@ -2713,6 +3281,7 @@ def run_calc(
     mats = result["materials"]
     cash = result["cash"]
     sens_df = result["sens"]
+    dag_totals = result["dag"]
 
     def card(label: str, value: str, suffix: str = ""):
         return html.Div(
@@ -2797,18 +3366,15 @@ def run_calc(
         card("NPV (project)", f"{k['npv_total_eur'] / 1e6:.2f}", " M€"),
         card(
             "Breakeven Year",
-            str(
-                k["breakeven_year"]
-                if k["breakeven_year"] is not None
-                else "n/a"
-            ),
+            str(k["breakeven_year"] if k["breakeven_year"] is not None else "n/a"),
         ),
     ]
 
     fig_annual, fig_cell, fig_cap, fig_mat, fig_sens, fig_time = BatteryCostModel.figs(
         df, mats, k, cash, sens_df
     )
-    fig_sankey = BatteryCostModel.sankey(df, k, scale=1e6)
+    # Use DAG totals (multi-root aware) for Sankey
+    fig_sankey = BatteryCostModel.sankey(df, dag_totals, scale=1e6)
     columns, data = BatteryCostModel.table_view(df)
 
     return (
@@ -2826,8 +3392,5 @@ def run_calc(
 
 
 if __name__ == "__main__":
-    # NOTE: set debug=False in production deployments.
+    # NOTE: Use debug=False in production deployments.
     app.run(debug=True)
-
-
-
