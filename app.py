@@ -9,12 +9,15 @@ import copy
 import math
 import os
 from urllib.parse import quote
+import base64
+import json
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, html, dcc, Input, Output, State, dash_table, ctx
+import dash
 
 
 # ============================================================
@@ -425,7 +428,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "working_days": 365.0,
             "shifts_per_day": 3.0,
             "shift_hours": 8.0,
-            "oee": 0.855,
+            "avail": 0.855,
         },
         "econ": {
             "project_years": 10,
@@ -473,7 +476,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "working_days": 330.0,
             "shifts_per_day": 3.0,
             "shift_hours": 8.0,
-            "oee": 0.80,
+            "avail": 0.80,
         },
         "econ": {
             "project_years": 12,
@@ -516,7 +519,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "working_days": 350.0,
             "shifts_per_day": 2.5,
             "shift_hours": 8.0,
-            "oee": 0.82,
+            "avail": 0.82,
         },
         "econ": {
             "project_years": 10,
@@ -551,6 +554,61 @@ for preset in PRESETS.values():
 DEFAULT_PRESET_KEY = "NMC 4680 (Baseline)"
 DEFAULT_GENERAL = PRESETS[DEFAULT_PRESET_KEY]["general"]
 DEFAULT_ECON = PRESETS[DEFAULT_PRESET_KEY]["econ"]
+
+
+def _validate_preset_dict(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Lightweight validation/normalization for external presets."""
+    if not isinstance(p, dict):
+        raise ValueError("Preset must be a JSON object")
+    for key in ["general", "econ", "steps", "materials"]:
+        if key not in p:
+            raise ValueError(f"Preset missing required key '{key}'")
+    if not isinstance(p["steps"], list) or not isinstance(p["materials"], list):
+        raise ValueError("Preset 'steps' and 'materials' must be lists")
+    if "note" not in p:
+        p["note"] = ""
+    return p
+
+
+def load_external_presets(asset_dir: str = "assets") -> Dict[str, Dict[str, Any]]:
+    """Load *.json presets from the assets directory."""
+    presets: Dict[str, Dict[str, Any]] = {}
+    if not os.path.isdir(asset_dir):
+        return presets
+    for fname in os.listdir(asset_dir):
+        if not fname.lower().endswith(".json"):
+            continue
+        fpath = os.path.join(asset_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            preset = _validate_preset_dict(data)
+            key = preset.get("name") or os.path.splitext(fname)[0]
+            presets[key] = preset
+        except Exception:
+            # Ignore bad files; keep the app running
+            continue
+    return presets
+
+
+EXTERNAL_PRESETS = load_external_presets("assets")
+
+
+def all_presets() -> Dict[str, Dict[str, Any]]:
+    """Return combined built-in and external presets."""
+    combined = copy.deepcopy(PRESETS)
+    for k, v in EXTERNAL_PRESETS.items():
+        combined.setdefault(k, copy.deepcopy(v))
+    return combined
+
+
+def current_app_presets(store_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Merge built-in + disk-loaded + in-app imported presets (from store)."""
+    base = all_presets()
+    if isinstance(store_data, dict):
+        for k, v in store_data.items():
+            base[k] = v
+    return base
 
 
 def _resolve_cell_params(
@@ -725,6 +783,8 @@ def _simulate_unit_flow(
     root_ids: List[str] | None,
     id_col: str,
     scrap_col: str,
+    root_injection: Dict[str, float] | None = None,
+    normalize_roots: bool = True,
 ) -> Tuple[
     Dict[str, float],
     Dict[str, float],
@@ -740,6 +800,10 @@ def _simulate_unit_flow(
       (parallel process branches) are all active.
     - If a specific list is provided, one unit is injected into each of those
       steps. This is used for material survival from an intro step.
+
+    root_injection: optional map of {root_id: amount}. If None, defaults to 1 per
+      active root. If normalize_roots=True, the map is normalized to sum to 1.0
+      so upstream demand is not scaled by the number of roots.
 
     Returns:
       flow_in[step]:     units entering each step per unit configuration
@@ -769,10 +833,26 @@ def _simulate_unit_flow(
     if not active_roots:
         raise ValueError("No root steps supplied for unit-flow simulation.")
 
-    for rid in active_roots:
+    if root_injection is None:
+        root_injection = {rid: 1.0 for rid in active_roots}
+
+    root_injection = {
+        str(k): float(v) for k, v in (root_injection or {}).items() if k in flow_in
+    }
+    if not root_injection:
+        raise ValueError("Root injection map is empty after validation.")
+
+    if normalize_roots:
+        total_injection = sum(root_injection.values())
+        if total_injection > 0:
+            root_injection = {
+                k: v / total_injection for k, v in root_injection.items()
+            }
+
+    for rid, amt in root_injection.items():
         if rid not in flow_in:
             raise KeyError(f"Unknown root step id '{rid}' in unit-flow simulation.")
-        flow_in[rid] += 1.0
+        flow_in[rid] += max(amt, 0.0)
 
     final_good = 0.0
 
@@ -781,7 +861,13 @@ def _simulate_unit_flow(
         scrap_rate = float(row.get(scrap_col, 0.0) or 0.0)
         scrap_rate = min(max(scrap_rate, 0.0), 1.0)
 
-        fin = flow_in[sid]
+        # Assembly-aware merge: if multiple predecessors feed this step, the
+        # assembled inflow is limited by the smallest contributing branch.
+        incoming_edges = [edge_good.get((p, sid), 0.0) for p in graph["pred"][sid]]
+        if len(incoming_edges) > 1:
+            fin = min(incoming_edges)
+        else:
+            fin = flow_in[sid]
         good = fin * (1.0 - scrap_rate)
         scrap = fin - good
 
@@ -887,7 +973,7 @@ class GeneralAssumptions:
     working_days: float
     shifts_per_day: float
     shift_hours: float
-    oee: float
+    avail: float
 
 
 @dataclass(frozen=True)
@@ -992,9 +1078,9 @@ class BatteryCostModel:
         # ------------------------------------------------------------------
         # 2) Time base and annual volume target
         # ------------------------------------------------------------------
-        oee = max(min(g.oee, 1.0), 0.0)
+        avail = max(min(g.avail, 1.0), 0.0)
         hours_year = g.working_days * g.shifts_per_day * g.shift_hours
-        avail_time_seconds = hours_year * 3600.0 * oee
+        avail_time_seconds = hours_year * 3600.0 * avail
 
         cell_wh = g.cell_wh if g.cell_wh > 0 else g.cell_ah * g.cell_voltage
         cell_wh = max(cell_wh, 1e-9)
@@ -1144,36 +1230,17 @@ class BatteryCostModel:
         for _, row in df.iterrows():
             name_to_sid.setdefault(row["step"], row["step_id"])
 
-        def _material_survival(intro_name: str) -> float:
-            """
-            Survival from intro step to final good cell:
-            simulate 1 unit entering the intro step on the DAG and see
-            how much final good comes out.
-            """
-            sid = name_to_sid.get(intro_name)
+        def _material_survival(step_name: str) -> float:
+            """Survival from intro step to final good using main DAG flows."""
+            sid = name_to_sid.get(step_name)
             if not sid:
                 return 1.0
-            (
-                _flow_in,
-                _good_out,
-                _scrap_amt,
-                _edge_good,
-                final_good_from_intro,
-            ) = _simulate_unit_flow(
-                df,
-                graph,
-                root_ids=[sid],         # single-start survival simulation
-                id_col="step_id",
-                scrap_col="scrap_rate",
-            )
-            return max(final_good_from_intro, 1e-6)
+            entered = float(flow_in_unit.get(sid, 0.0))
+            if entered <= 0:
+                return 1e-6
+            return max(final_good_unit / entered, 1e-6)
 
-        mats["survival"] = (
-            mats["intro_step"]
-            .map(_material_survival)
-            .astype(float)
-            .clip(lower=1e-6)
-        )
+        mats["survival"] = mats["intro_step"].map(_material_survival).astype(float)
 
         is_m2 = mats["pricing_unit"].eq("m2")
         mats["net_cost_per_cell_eur"] = np.where(
@@ -1874,6 +1941,7 @@ class BatteryCostModel:
 app = Dash(__name__)
 server = app.server
 app.title = "Cell Cost Estimator"
+available_presets_init = all_presets()
 
 
 def logo_src() -> str:
@@ -1984,7 +2052,7 @@ preset_controls = html.Div(
             [
                 dcc.Dropdown(
                     id="preset_select",
-                    options=[{"label": k, "value": k} for k in PRESETS.keys()],
+                    options=[{"label": k, "value": k} for k in available_presets_init.keys()],
                     value=DEFAULT_PRESET_KEY,
                     clearable=False,
                     style={"width": "100%"},
@@ -2004,6 +2072,34 @@ preset_controls = html.Div(
                         "cursor": "pointer",
                     },
                 ),
+                html.Button(
+                    "Export current as JSON",
+                    id="export_preset",
+                    n_clicks=0,
+                    style={
+                        "marginTop": "6px",
+                        "width": "100%",
+                        "padding": "8px",
+                        "backgroundColor": "#2563eb",
+                        "color": "white",
+                        "border": "none",
+                        "borderRadius": "6px",
+                        "cursor": "pointer",
+                    },
+                ),
+                dcc.Upload(
+                    id="preset_upload",
+                    children=html.Div("Import preset JSON (drop or click)", style={"textAlign": "center"}),
+                    style={
+                        "marginTop": "6px",
+                        "padding": "10px",
+                        "border": "1px dashed #ccc",
+                        "borderRadius": "6px",
+                        "cursor": "pointer",
+                    },
+                    multiple=False,
+                ),
+                dcc.Download(id="preset_download"),
             ]
         ),
         html.Div(
@@ -2077,10 +2173,10 @@ left_inputs = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Label("OEE (0–1)"),
+                        html.Label("Availability (0–1)"),
                         num_input(
-                            "oee",
-                            DEFAULT_GENERAL["oee"],
+                            "avail",
+                            DEFAULT_GENERAL["avail"],
                             step="any",
                             min_=0,
                             max_=1,
@@ -2602,6 +2698,9 @@ left_inputs = html.Div(
         "overflowY": "auto",
         "padding": "8px",
         "borderRight": "1px solid #eee",
+        "backgroundImage": "url('/assets/background.jpg')",
+        "backgroundSize": "cover",
+        "backgroundPosition": "center",
     },
 )
 
@@ -2719,7 +2818,8 @@ right_outputs = html.Div(
         dash_table.DataTable(
             id="steps_table_main",
             page_size=15,
-            style_table={"overflowX": "auto",
+            style_table={
+                         "overflowX": "auto",
                          "maxHeight": "400px",
                          "overflowY": "auto",
                          },
@@ -2743,7 +2843,7 @@ right_outputs = html.Div(
                         ),
                         html.Li(
                             "Line cycle (takt) = available_time_seconds / final_good_cells. "
-                            "Available time = days × shifts × hours × 3600 × OEE."
+                            "Available time = days × shifts × hours × 3600 × Availability."
                         ),
                         html.Li(
                             "Machines per step are sized purely from lead time: "
@@ -2781,11 +2881,15 @@ right_outputs = html.Div(
             open=False,
         ),
     ],
-    style={"height": "100%", "overflowY": "auto", "padding": "10px 12px"},
+    style={"height": "100%",
+           "overflowY": "auto",
+           "padding": "10px 12px",
+           },
 )
 
 app.layout = html.Div(
     [
+        dcc.Store(id="preset_store", data=available_presets_init),
         html.Div(
             [
                 html.Img(
@@ -2827,6 +2931,7 @@ app.layout = html.Div(
         "maxWidth": "100%",
         "margin": "0 auto",
         "padding": "0 8px 8px",
+
     },
 )
 
@@ -2949,6 +3054,184 @@ def update_steps_dropdown(steps_rows):
         "successor_step": {"options": successor_options},
     }
 
+    return {
+        "env": {"options": ENV_DROPDOWN_OPTIONS},
+        "successor_step": {"options": successor_options},
+    }
+
+
+@app.callback(
+    Output("preset_select", "options"),
+    Output("preset_select", "value", allow_duplicate=True),
+    Input("preset_store", "data"),
+    State("preset_select", "value"),
+    prevent_initial_call=True,
+)
+def sync_preset_dropdown(store_data, current_value):
+    """Keep the preset dropdown in sync with available presets (built-in + external/imported)."""
+    store_data = store_data or {}
+    options = [{"label": k, "value": k} for k in store_data.keys()]
+    value = current_value if current_value in store_data else (options[0]["value"] if options else None)
+    return options, value
+
+
+@app.callback(
+    Output("preset_store", "data"),
+    Output("preset_select", "value", allow_duplicate=True),
+    Output("preset_note", "children", allow_duplicate=True),
+    Input("preset_upload", "contents"),
+    State("preset_upload", "filename"),
+    State("preset_store", "data"),
+    prevent_initial_call=True,
+)
+def import_preset(contents, filename, store_data):
+    """Handle preset import from JSON file."""
+    store = store_data or {}
+    if not contents or not filename:
+        return store, dash.no_update, dash.no_update
+    try:
+        _header, data = contents.split(",", 1)
+        decoded = base64.b64decode(data)
+        preset_raw = json.loads(decoded.decode("utf-8"))
+        preset = _validate_preset_dict(preset_raw)
+        key = preset.get("name") or os.path.splitext(filename)[0]
+        store[key] = preset
+        note = f"Imported preset '{key}' from {filename}."
+        return store, key, note
+    except Exception as exc:  # pragma: no cover - defensive UI path
+        return store, dash.no_update, f"Import failed: {exc}"
+
+
+@app.callback(
+    Output("preset_download", "data"),
+    Input("export_preset", "n_clicks"),
+    # General / energy
+    State("el_price", "value"),
+    State("building_baseline_kwh", "value"),
+    State("labor_spec", "value"),
+    State("labor_sup", "value"),
+    State("bldg_cost", "value"),
+    State("indoor_factor", "value"),
+    State("outdoor_factor", "value"),
+    State("clean_mult", "value"),
+    State("clean_add", "value"),
+    State("dry_mult", "value"),
+    State("dry_add", "value"),
+    State("gwh", "value"),
+    State("cell_ah", "value"),
+    State("cell_wh", "value"),
+    State("cell_v", "value"),
+    State("days", "value"),
+    State("shifts", "value"),
+    State("hshift", "value"),
+    State("avail", "value"),
+    # Econ / overhead
+    State("proj_years", "value"),
+    State("tax", "value"),
+    State("dep_equip", "value"),
+    State("dep_bldg", "value"),
+    State("build_years", "value"),
+    State("ramp_years", "value"),
+    State("wacc", "value"),
+    State("margin", "value"),
+    State("oh_indirect_personnel", "value"),
+    State("oh_logistics_personnel", "value"),
+    State("oh_building_maintenance", "value"),
+    State("oh_machine_maintenance", "value"),
+    State("inv_logistics_factor", "value"),
+    State("inv_indirect_factor", "value"),
+    # Tables
+    State("materials_table", "data"),
+    State("steps_table", "data"),
+    State("preset_select", "value"),
+    prevent_initial_call=True,
+)
+def export_preset(
+    _,
+    el_price,
+    building_baseline_kwh,
+    labor_spec,
+    labor_sup,
+    bldg_cost,
+    indoor_factor,
+    outdoor_factor,
+    clean_mult,
+    clean_add,
+    dry_mult,
+    dry_add,
+    gwh,
+    cell_ah,
+    cell_wh,
+    cell_v,
+    days,
+    shifts,
+    hshift,
+    avail,
+    proj_years,
+    tax,
+    dep_equip,
+    dep_bldg,
+    build_years,
+    ramp_years,
+    wacc,
+    margin,
+    oh_indirect_personnel,
+    oh_logistics_personnel,
+    oh_building_maintenance,
+    oh_machine_maintenance,
+    inv_logistics_factor,
+    inv_indirect_factor,
+    materials_rows,
+    steps_rows,
+    preset_key,
+):
+    """Export current UI state as a JSON preset."""
+    preset = {
+        "name": preset_key or "exported_preset",
+        "general": {
+            "electricity_price_eur_per_kwh": el_price,
+            "baseline_building_kwh": building_baseline_kwh,
+            "specialist_labor_eur_per_h": labor_spec,
+            "support_labor_eur_per_h": labor_sup,
+            "building_cost_eur_per_m2": bldg_cost,
+            "indoor_area_factor": indoor_factor,
+            "outdoor_area_factor": outdoor_factor,
+            "clean_area_multiplier": clean_mult,
+            "clean_add_cost_eur_per_m2": clean_add,
+            "dry_area_multiplier": dry_mult,
+            "dry_add_cost_eur_per_m2": dry_add,
+            "annual_output_gwh": gwh,
+            "cell_ah": cell_ah,
+            "cell_voltage": cell_v,
+            "cell_wh": cell_wh,
+            "working_days": days,
+            "shifts_per_day": shifts,
+            "shift_hours": hshift,
+            "avail": avail,
+        },
+        "econ": {
+            "project_years": proj_years,
+            "tax_rate": tax,
+            "depreciation_years_equipment": dep_equip,
+            "depreciation_years_building": dep_bldg,
+            "construction_years": build_years,
+            "ramp_years": ramp_years,
+            "capital_cost_wacc": wacc,
+            "desired_margin": margin,
+            "indirect_personnel_factor": oh_indirect_personnel,
+            "logistics_personnel_factor": oh_logistics_personnel,
+            "building_maintenance_factor": oh_building_maintenance,
+            "machine_maintenance_factor": oh_machine_maintenance,
+            "logistics_investment_factor": inv_logistics_factor,
+            "indirect_investment_factor": inv_indirect_factor,
+        },
+        "steps": steps_rows or [],
+        "materials": materials_rows or [],
+        "note": f"Exported from app preset '{preset_key or 'custom'}'.",
+    }
+    payload = json.dumps(preset, indent=2)
+    return dcc.send_string(payload, filename=f"{preset_key or 'preset'}.json")
+
 
 @app.callback(
     # General/Econ inputs:
@@ -2970,7 +3253,7 @@ def update_steps_dropdown(steps_rows):
     Output("days", "value", allow_duplicate=True),
     Output("shifts", "value", allow_duplicate=True),
     Output("hshift", "value", allow_duplicate=True),
-    Output("oee", "value", allow_duplicate=True),
+    Output("avail", "value", allow_duplicate=True),
     Output("proj_years", "value", allow_duplicate=True),
     Output("tax", "value", allow_duplicate=True),
     Output("dep_equip", "value", allow_duplicate=True),
@@ -2993,11 +3276,13 @@ def update_steps_dropdown(steps_rows):
     Output("preset_note", "children", allow_duplicate=True),
     Input("apply_preset", "n_clicks"),
     State("preset_select", "value"),
+    State("preset_store", "data"),
     prevent_initial_call=True,
 )
-def apply_preset(n, preset_key):
+def apply_preset(n, preset_key, preset_store):
     """Apply selected preset to all inputs and tables."""
-    p = PRESETS.get(preset_key, PRESETS[DEFAULT_PRESET_KEY])
+    all_p = current_app_presets(preset_store)
+    p = all_p.get(preset_key, all_p.get(DEFAULT_PRESET_KEY, next(iter(all_p.values()))))
     g = p["general"]
     ec = p["econ"]
 
@@ -3035,7 +3320,7 @@ def apply_preset(n, preset_key):
         g["working_days"],
         g["shifts_per_day"],
         g["shift_hours"],
-        g["oee"],
+        g["avail"],
         ec["project_years"],
         ec["tax_rate"],
         ec["depreciation_years_equipment"],
@@ -3113,7 +3398,7 @@ def sync_materials_intro_step(steps_rows, materials_rows):
     State("days", "value"),
     State("shifts", "value"),
     State("hshift", "value"),
-    State("oee", "value"),
+    State("avail", "value"),
     # Econ / overhead
     State("proj_years", "value"),
     State("tax", "value"),
@@ -3154,7 +3439,7 @@ def run_calc(
     days,
     shifts,
     hshift,
-    oee,
+    avail,
     proj_years,
     tax,
     dep_equip,
@@ -3218,7 +3503,7 @@ def run_calc(
         working_days=float(days or DEFAULT_GENERAL["working_days"]),
         shifts_per_day=float(shifts or DEFAULT_GENERAL["shifts_per_day"]),
         shift_hours=float(hshift or DEFAULT_GENERAL["shift_hours"]),
-        oee=float(oee or DEFAULT_GENERAL["oee"]),
+        avail=float(avail or DEFAULT_GENERAL["avail"]),
     )
 
     econ = Economics(
