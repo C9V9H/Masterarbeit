@@ -1,0 +1,16 @@
+/* assets/style.css */
+body { 	margin: 0; padding: 0; font-family: "HelveticaNeue-Light", "Helvetica Neue Light", "Helvetica Neue", 
+  Helvetica, Arial, "Lucida Grande", sans-serif; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+.panel { background: #fafafa; padding: 16px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+.grid { display: grid; grid-template-columns: repeat(3, minmax(160px,1fr)); gap: 12px; }
+.field { display:flex; flex-direction:column; gap:6px; }
+.label { font-size: 12px; color: #444; }
+.num, .text { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px; }
+.kpis { display:grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.kpi { background:white; border-radius: 12px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.kpi .h { font-size:12px; color:#666; }
+.kpi .v { font-size:22px; font-weight:600; }
+.row { display:flex; gap:8px; align-items:center; margin-top:8px; }
+.hint { font-size: 12px; color:#666; margin-top:8px; }
+h1,h2,h3{ margin-top: 12px; }
