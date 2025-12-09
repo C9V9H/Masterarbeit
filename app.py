@@ -440,7 +440,9 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "depreciation_years_equipment": 7,
             "depreciation_years_building": 33,
             "construction_years": 2,
-            "ramp_years": 1,
+            "ramp_years": 0,
+            "ramp_scrap_rates": [],
+            "ramp_output_rates": [],
             "capital_cost_wacc": 0.06,
             "desired_margin": 0.15,
             # Overhead factors (relative to direct labor or assets)
@@ -491,7 +493,9 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "depreciation_years_equipment": 8,
             "depreciation_years_building": 35,
             "construction_years": 3,
-            "ramp_years": 2,
+            "ramp_years": 0,
+            "ramp_scrap_rates": [],
+            "ramp_output_rates": [],
             "capital_cost_wacc": 0.07,
             "desired_margin": 0.18,
             "indirect_personnel_factor": 0.30,
@@ -537,7 +541,9 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "depreciation_years_equipment": 7,
             "depreciation_years_building": 30,
             "construction_years": 2,
-            "ramp_years": 1,
+            "ramp_years": 0,
+            "ramp_scrap_rates": [],
+            "ramp_output_rates": [],
             "capital_cost_wacc": 0.065,
             "desired_margin": 0.16,
             "indirect_personnel_factor": 0.22,
@@ -569,7 +575,7 @@ DEFAULT_ECON = PRESETS[DEFAULT_PRESET_KEY]["econ"]
 GWH_SWEEP_MIN_FACTOR = 0.2
 GWH_SWEEP_MAX_MULTIPLIER = 5.0
 GWH_SWEEP_MIN_FLOOR = 0.1
-GWH_SWEEP_DEFAULT_POINTS = 100
+GWH_SWEEP_DEFAULT_POINTS = 10
 
 def _validate_preset_dict(p: Dict[str, Any]) -> Dict[str, Any]:
     """Lightweight validation/normalization for external presets."""
@@ -1013,6 +1019,7 @@ class Economics:
     logistics_investment_factor: float
     indirect_investment_factor: float
     ramp_scrap_rates: List[float] | None = None  # per-ramp-year scrap, revenue-only
+    ramp_output_rates: List[float] | None = None
 
 
 @dataclass
@@ -1311,6 +1318,7 @@ class BatteryCostModel:
         # 6) Labor per cell (based on line takt, not per-step takt)
         # ------------------------------------------------------------------
         line_cycle_time_s = avail_time_seconds / max(final_cells_required, 1.0)
+        cpm = max(final_cells_required, 1.0) * 60 / avail_time_seconds
 
         df["spec_hours_per_cell"] = (
             df["spec_workers_per_machine"] * df["machines"]
@@ -1500,6 +1508,23 @@ class BatteryCostModel:
 
         prod_cells_per_year = [0.0] * (e.project_years + 1)
         start_prod_year = e.construction_years
+
+        output_list = list(getattr(e, "ramp_output_rates", []) or [])
+
+        def _clamp_output(v: float) -> float:
+            return max(min(float(v), 1.0), 0.0)
+
+        def _output_for_year(idx: int) -> float:
+            if e.ramp_years and idx >= e.ramp_years:
+                return 1.0
+            if not output_list:
+                return 1.0
+            if idx < len(output_list):
+                return _clamp_output(output_list[idx])
+            return _clamp_output(output_list[-1])
+
+
+
         scrap_list = list(getattr(e, "ramp_scrap_rates", []) or [])
 
         def _clamp_scrap(v: float) -> float:
@@ -1520,8 +1545,9 @@ class BatteryCostModel:
         start_prod_year = e.construction_years
         for y in range(start_prod_year, e.project_years + 1):
             t = y - start_prod_year  # ramp year index
+            output_mult = _output_for_year(t)
             scrap = _scrap_for_year(t)
-            prod_cells_per_year[y] = final_cells_required
+            prod_cells_per_year[y] = final_cells_required * output_mult
             good_cells_per_year[y] = prod_cells_per_year[y] * (1.0 - scrap)
 
         # Opex excludes depreciation; overheads are already included above
@@ -1596,6 +1622,7 @@ class BatteryCostModel:
             "final_cells_required": final_cells_required,
             "available_time_seconds": avail_time_seconds,
             "line_cycle_time_s": line_cycle_time_s,
+            "cpm": cpm,
             "line_capacity_cells": line_capacity_cells,
             "actual_cells": actual_cells_for_cost,
             "bottleneck_step": df.loc[df["step_id"] == bottleneck_sid, "step"].iloc[0],
@@ -2870,7 +2897,8 @@ right_outputs = html.Div(
              style={
                  "marginTop": "8px",
                  "marginBottom": "8px",
-                 "height": "320px",
+                 "height": "20vh",
+                 "maxheight": "380px",
              },
          ),
         html.Div(
@@ -2894,10 +2922,11 @@ right_outputs = html.Div(
                     ],
                     style={
                         "marginTop": "8px",
-                        "height": "100%",
-                        "width": "48%",
-                        "display": "inline-block",
-                        "verticalAlign": "top",
+                        "flex": "1 1 380px",
+                        "minWidth": "320px",
+                        "maxWidth": "100%",
+                        "height": "50vh",
+                        "maxheight": "400px",
                     },
                 ),
                 html.Div(
@@ -2907,19 +2936,19 @@ right_outputs = html.Div(
                     ],
                     style={
                         "marginTop": "8px",
-                        "height": "100%",
-                        "width": "48%",
-                        "display": "inline-block",
-                        "verticalAlign": "top",
+                        "flex": "1 1 380px",
+                        "minWidth": "320px",
+                        "maxWidth": "100%",
+                        "height": "50vh",
+                        "maxheight": "400px",
                     },
                 ),
             ],
             style={
                 "marginTop": "8px",
                 "display": "flex",
-                "justifyContent": "space-between",
-                "gap": "12px",
                 "flexWrap": "wrap",
+                "gap": "12px",
             },
         ),
         html.Div(
@@ -2931,7 +2960,8 @@ right_outputs = html.Div(
                     ],
                     style={
                         "marginTop": "8px",
-                        "height": "100%",
+                        "height": "50vh",
+                        "maxheight": "400px",
                         "width": "48%",
                         "display": "inline-block",
                         "verticalAlign": "top",
@@ -2945,7 +2975,8 @@ right_outputs = html.Div(
                     ],
                     style={
                         "marginTop": "8px",
-                        "height": "100%",
+                        "height": "50vh",
+                        "maxheight": "400px",
                         "width": "48%",
                         "display": "inline-block",
                         "verticalAlign": "top",
@@ -2969,7 +3000,8 @@ right_outputs = html.Div(
                     ],
                     style={
                         "marginTop": "8px",
-                        "height": "100%",
+                        "height": "50vh",
+                        "maxheight": "400px",
                         "width": "48%",
                         "display": "inline-block",
                         "verticalAlign": "top",
@@ -2982,7 +3014,8 @@ right_outputs = html.Div(
                     ],
                     style={
                         "marginTop": "8px",
-                        "height": "100%",
+                        "height": "50vh",
+                        "maxheight": "400px",
                         "width": "48%",
                         "display": "inline-block",
                         "verticalAlign": "top",
@@ -3091,6 +3124,7 @@ app.layout = html.Div(
     [
         dcc.Store(id="preset_store", data=available_presets_init),
         dcc.Store(id="ramp_scrap_store", data=[]),
+        dcc.Store(id="ramp_output_store", data=[]),
 
         html.Div(
             [
@@ -3126,16 +3160,17 @@ app.layout = html.Div(
         ),
         html.Div(
             style={
-                "height": "70px"
+                "height": "72px",
             }
         ),
+
         html.Div(
             [left_inputs, right_outputs],
             style={
                 "display": "grid",
                 "gridTemplateColumns": "clamp(380px, 32vw, 560px) 1fr",
                 "gap": "12px",
-                "height": "calc(100vh - 85px)",
+                "height": "calc(100vh - 72px)",
                 "alignItems": "stretch",
             },
         ),
@@ -3144,11 +3179,11 @@ app.layout = html.Div(
         "fontFamily": "HelveticaNeue-Light, Helvetica Neue Light, Helvetica Neue, Helvetica, Arial, Lucida Grande, sans-serif",
         "width": "100%",
         "maxWidth": "100%",
-        "minHeight": "calc(100vh - 72px)",
-        "height": "100vh",
-        "overflow": "hidden",
+        "minHeight": "100vh",
+        "overflowX": "hidden",
+        "overflowY": "auto",
         "margin": "0",
-        "padding": "0",
+        "padding": "0 12px 12px",
 
     },
 )
@@ -3322,35 +3357,62 @@ def import_preset(contents, filename, store_data):
 @app.callback(
     Output("ramp_scrap_rows", "children"),
     Output("ramp_scrap_store", "data"),
+    Output("ramp_output_store", "data"),
     Input("add_ramp_year", "n_clicks"),
     State("ramp_scrap_store", "data"),
+    State("ramp_output_store", "data"),
     prevent_initial_call=True,
 )
-def add_ramp_row(n, data):
-    data = list(data or [])
-    # add a new year with default 0.0 scrap
-    data.append(0.0)
+def add_ramp_row(n, scrap_data, output_data):
+    scrap = list(scrap_data or [])
+    output = list(output_data or [])
+    scrap.append(0.0)
+    output.append(0.5)  # default 50% output in first added ramp year
     rows = []
-    for i, val in enumerate(data, start=1):
+    for i, (s, o) in enumerate(zip(scrap, output), start=1):
         rows.append(
             html.Div(
                 [
+                    html.Label(f"Ramp year {i} output"),
+                    dcc.Slider(
+                        id={"type": "ramp_output_slider", "index": i},
+                        min=0.0,
+                        max=1.0,
+                        step=0.05,
+                        value=float(o),
+                        marks={0: "0%", 0.5: "50%", 1.0: "100%"},
+                        tooltip={"placement": "bottom", "always_visible": True},
+                    ),
                     html.Label(f"Ramp year {i} scrap"),
                     dcc.Slider(
                         id={"type": "ramp_scrap_slider", "index": i},
                         min=0.0,
                         max=0.99,
                         step=0.01,
-                        value=float(val),
+                        value=float(s),
                         marks={0: "0", 0.5: "50%", 0.9: "90%"},
                         tooltip={"placement": "bottom", "always_visible": True},
                     ),
                 ],
                 style={"border": "1px solid #eee", "borderRadius": "8px", "padding": "8px"},
-
             )
         )
-    return rows, data
+    return rows, scrap, output
+
+@app.callback(
+    Output("ramp_output_store", "data", allow_duplicate=True),
+    Input({"type": "ramp_output_slider", "index": dash.ALL}, "value"),
+    State("ramp_output_store", "data"),
+    prevent_initial_call=True,
+)
+def update_ramp_output(values, data):
+    if values is None:
+        return dash.no_update
+    current = list(data or [])
+    new_vals = list(values)
+    if len(new_vals) < len(current):
+        new_vals.extend([1.0] * (len(current) - len(new_vals)))
+    return [max(min(float(v), 1.0), 0.0) for v in new_vals[: len(current)]]
 
 @app.callback(
     Output("ramp_scrap_store", "data", allow_duplicate=True),
@@ -3359,14 +3421,13 @@ def add_ramp_row(n, data):
     prevent_initial_call=True,
 )
 def update_ramp_store(values, data):
-    data = list(data or [])
     if values is None:
         return dash.no_update
-    # values aligns with order of rows; pad/truncate to length
+    current = list(data or [])
     new_vals = list(values)
-    if len(new_vals) < len(data):
-        new_vals.extend([0.0] * (len(data) - len(new_vals)))
-    return [max(min(float(v), 0.999), 0.0) for v in new_vals[: len(data)]]
+    if len(new_vals) < len(current):
+        new_vals.extend([0.0] * (len(current) - len(new_vals)))
+    return [max(min(float(v), 0.999), 0.0) for v in new_vals[: len(current)]]
 
 
 @app.callback(
@@ -3446,6 +3507,7 @@ def export_preset(
     dep_bldg,
     build_years,
     ramp_scrap_store,
+    ramp_output_store,
     wacc,
     margin,
     oh_indirect_personnel,
@@ -3543,6 +3605,7 @@ def export_preset(
     Output("dep_bldg", "value", allow_duplicate=True),
     Output("build_years", "value", allow_duplicate=True),
     Output("ramp_scrap_store", "data", allow_duplicate=True),
+    Output("ramp_output_store", "data", allow_duplicate=True),
     Output("wacc", "value", allow_duplicate=True),
     Output("margin", "value", allow_duplicate=True),
     # Overhead & investment factors:
@@ -3569,6 +3632,7 @@ def apply_preset(n, preset_key, preset_store):
     g = p["general"]
     ec = p["econ"]
     ramp_scrap = list(ec.get("ramp_scrap_rates", []) or [])
+    ramp_output = list(ec.get("ramp_output_rates", []) or [])
 
     steps = copy.deepcopy(p["steps"])
     for i, r in enumerate(steps, start=1):
@@ -3708,6 +3772,7 @@ def sync_materials_intro_step(steps_rows, materials_rows):
     State("dep_bldg", "value"),
     State("build_years", "value"),
     State("ramp_scrap_store", "data"),
+    State("ramp_output_store", "data"),
     State("wacc", "value"),
     State("margin", "value"),
     State("oh_indirect_personnel", "value"),
@@ -3754,6 +3819,7 @@ def run_calc(
     dep_bldg,
     build_years,
     ramp_scrap_store,
+    ramp_output_store,
     wacc,
     margin,
     oh_indirect_personnel,
@@ -3824,7 +3890,12 @@ def run_calc(
     )
 
     ramp_scrap_list = list(ramp_scrap_store or [])
-    ramp_years_val = len(ramp_scrap_list) if ramp_scrap_list else DEFAULT_ECON["ramp_years"]
+    ramp_output_list = list(ramp_output_store or [])
+    ramp_years_val = (
+        max(len(ramp_scrap_list), len(ramp_output_list))
+        if (ramp_scrap_list or ramp_output_list)
+        else DEFAULT_ECON["ramp_years"]
+    )
 
 
     econ = Economics(
@@ -3859,6 +3930,7 @@ def run_calc(
             inv_indirect_factor or DEFAULT_ECON["indirect_investment_factor"]
         ),
         ramp_scrap_rates=ramp_scrap_list,
+        ramp_output_rates=ramp_output_list,
     )
 
     steps = pd.DataFrame(steps_rows or [])
@@ -3901,12 +3973,13 @@ def run_calc(
 
     kpi_children = [
         card("Line Cycle / Takt", f"{k['line_cycle_time_s']:.3f}", " s"),
+        card("CPM", f"{k['cpm']:.0f}", " 1/min"),
         card("Final Cells Target", f"{k['final_cells_required']:.0f}"),
         card("Line Capacity (Cells)", f"{k['line_capacity_cells']:.0f}"),
         card("Bottleneck", str(k["bottleneck_step"])),
         card(
             "Build Cost / Cell",
-            f"{k['unit_cost_build_eur_per_cell']:.4f}",
+            f"{k['unit_cost_build_eur_per_cell']:.2f}",
             " €",
         ),
         card(
@@ -3914,7 +3987,7 @@ def run_calc(
             f"{k['cost_build_per_kwh_eur']:.2f}",
             " €/kWh",
         ),
-        card("Price / Cell (margin)", f"{k['price_per_cell_eur']:.4f}", " €"),
+        card("Price / Cell (margin)", f"{k['price_per_cell_eur']:.2f}", " €"),
         card(
             "Price / kWh (margin)",
             f"{k['price_per_kwh_eur']:.2f}",
@@ -3977,7 +4050,7 @@ def run_calc(
         gwh_input = general.annual_output_gwh
     sweep_min = max(0.1, gwh_input * 0.2)
     sweep_max = max(gwh_input, 0.1) * 5
-    gwh_points = np.linspace(sweep_min, sweep_max, 100)
+    gwh_points = np.linspace(sweep_min, sweep_max, 10)
     sweep_min_default = max(GWH_SWEEP_MIN_FLOOR, gwh_input * GWH_SWEEP_MIN_FACTOR)
     sweep_max_default = max(gwh_input, GWH_SWEEP_MIN_FLOOR) * GWH_SWEEP_MAX_MULTIPLIER
 
