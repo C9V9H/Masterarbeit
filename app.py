@@ -2895,26 +2895,24 @@ right_outputs = html.Div(
                  },
              ),
              dcc.Graph(id="fig_utilization_gwh",
-                    style={"height": "320px"},
+                    style={"height": "450px"},
                     config={"responsive": True},
                 ),
          ],
              style={
                  "marginTop": "8px",
-                 "maxHeight": "450px",
              },
          ),
         html.Div(
             [
             html.H4("Unit Cost vs Annual Output"),
                 dcc.Graph(id="fig_cost_gwh",
-                    style={"height": "320px"},
+                    style={"height": "450px"},
                     config={"responsive": True},
                 ),
             ],
             style={
                 "marginTop": "30px",
-                "maxHeight": "450px",
             },
         ),
 
@@ -2925,7 +2923,7 @@ right_outputs = html.Div(
                     [
                         html.H4("Annual Steady-State Cost Breakdown (€/yr)"),
                         dcc.Graph(id="fig_annual",
-                            style={"height": "360px"},
+                            style={"height": "450px"},
                             config={"responsive": True},
                         ),
                     ],
@@ -2934,14 +2932,13 @@ right_outputs = html.Div(
                         "flex": "1 1 420px",
                         "minWidth": "320px",
                         "maxWidth": "100%",
-                        "maxHeight": "450px",
                     },
                 ),
                 html.Div(
                     [
                         html.H4("Single-Cell Cost Breakdown (€/cell)"),
                         dcc.Graph(id="fig_cell",
-                            style={"height": "360px"},
+                            style={"height": "450px"},
                             config={"responsive": True},
                         ),
                     ],
@@ -2950,7 +2947,6 @@ right_outputs = html.Div(
                         "flex": "1 1 420px",
                         "minWidth": "320px",
                         "maxWidth": "100%",
-                        "maxHeight": "450px",
                     },
                 ),
             ],
@@ -2967,7 +2963,7 @@ right_outputs = html.Div(
                     [
                         html.H4("Step Capacity (Cells/Year) & Final Target"),
                         dcc.Graph(id="fig_cap",
-                            style={"height": "360px"},
+                            style={"height": "450px"},
                             config={"responsive": True},
                         ),
                     ],
@@ -2976,7 +2972,6 @@ right_outputs = html.Div(
                         "flex": "1 1 420px",
                         "minWidth": "320px",
                         "maxWidth": "100%",
-                        "maxHeight": "450px",
                     },
                 ),
 
@@ -2984,7 +2979,7 @@ right_outputs = html.Div(
                     [
                         html.H4("Materials Procurement Breakdown (€/cell)"),
                         dcc.Graph(id="fig_mat",
-                            style={"height": "360px"},
+                            style={"height": "450px"},
                             config={"responsive": True},
                         ),
                     ],
@@ -2993,7 +2988,6 @@ right_outputs = html.Div(
                         "flex": "1 1 420px",
                         "minWidth": "320px",
                         "maxWidth": "100%",
-                        "maxHeight": "450px",
                     },
                 ),
             ],
@@ -3010,7 +3004,7 @@ right_outputs = html.Div(
                     [
                         html.H4("Tornado Sensitivity (±25% — €/cell)"),
                         dcc.Graph(id="fig_sens",
-                            style={"height": "360px"},
+                            style={"height": "450px"},
                             config={"responsive": True},
                         ),
                     ],
@@ -3019,14 +3013,13 @@ right_outputs = html.Div(
                         "flex": "1 1 420px",
                         "minWidth": "320px",
                         "maxWidth": "100%",
-                        "maxHeight": "450px",
                     },
                 ),
                 html.Div(
                     [
                         html.H4("Project Timeline: Costs (bars) & Revenue (line)"),
                         dcc.Graph(id="fig_time",
-                            style={"height": "360px"},
+                            style={"height": "450px"},
                             config={"responsive": True},
                         ),
                     ],
@@ -3035,7 +3028,6 @@ right_outputs = html.Div(
                         "flex": "1 1 420px",
                         "minWidth": "320px",
                         "maxWidth": "100%",
-                        "maxHeight": "450px",
                     },
                 ),
             ],
