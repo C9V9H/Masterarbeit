@@ -3178,7 +3178,7 @@ app.layout = html.Div(
                 "display": "grid",
                 "gridTemplateColumns": "clamp(380px, 32vw, 560px) 1fr",
                 "gap": "12px",
-                "height": "calc(100vh - 72px)",
+                "height": "calc(100vh - 90px)",
                 "alignItems": "stretch",
             },
         ),
@@ -3189,9 +3189,10 @@ app.layout = html.Div(
         "maxWidth": "100%",
         "minHeight": "100vh",
         "overflowX": "hidden",
-        "overflowY": "auto",
+        "overflowY": "hidden",
         "margin": "0",
-        "padding": "0 12px 12px",
+        "padding": "0 12px 0",
+        "boxSizing": "border-box",
 
     },
 )
